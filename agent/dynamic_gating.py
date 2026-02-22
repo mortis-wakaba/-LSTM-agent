@@ -3,77 +3,125 @@
 dynamic_gating.py
 
 动态门控融合模块：负责融合 LSTM 历史模型分数和 Agent 即时多跳分数的最终中枢决策。
-实现了“内生-外生双轨融合架构”的核心权重量化分配逻辑。
+包含两种可配置的融合模式：数学门控驱动 (Mode A) 与 双向注意力适配机制 (Mode B)。
 """
+
+import math
+from typing import List
 
 class FusionEngine:
     """
     负责动态权重分配与最终买卖量化信号映射的引挚。
     """
-    
-    def calculate_final_score(self, lstm_score: float, agent_signal: float, is_holiday_aftermath: bool = False) -> dict:
+    def __init__(self, mode: str = 'math', k: float = 2.0):
         """
-        根据动态门控机制计算个股最终得分。
-        
-        逻辑要求（双轨融合门控算法）：
-        - 基础状态： 最终得分 = 0.7 * lstm_score + 0.3 * agent_signal
-        - 特例1 (长假断档接管)：当 is_holiday_aftermath=True 时，权重切换为 0.1 * LSTM + 0.9 * Agent
-        - 特例2 (核弹级事件夺权)：当 abs(agent_signal) > 0.8 时，Agent 强制夺权： 0.3 * LSTM + 0.7 * Agent
-        （注：如果特例1和特例2同时满足，代码优先让长假断档特例起判断主导，因其宏观背景更为确凿。）
+        初始化动态门控引擎。
         
         参数:
-            lstm_score (float): 队友 C 的 LSTM 趋势预测分数 [-1.0, 1.0]
-            agent_signal (float): 队友 B 的图谱推理得出的短期突发影响分数 [-1.0, 1.0]
-            is_holiday_aftermath (bool): 是否处于长假休市刚结束，数据断档的特殊时期
+            mode (str): 'math' 为数学公式门控，'attention' 为双轨注意力适配。
+            k (float): 数学模式下的超参数，用于控制 Agent 分数的非线性放大力度。
+        """
+        if mode not in ['math', 'attention']:
+            raise ValueError("mode 必须是 'math' 或 'attention'")
+        self.mode = mode
+        self.k = k
+
+    def calculate_final_score(self, lstm_features: List[float], agent_features: List[float]) -> dict:
+        """
+        根据指定的融合机制，计算个股最终得分。
+        
+        参数:
+            lstm_features (List[float]): LSTM 模型的 64 维隐状态输出向量。
+                                         我们约定第 0 维代表趋势主预测分 [-1.0, 1.0]。
+            agent_features (List[float]): Agent 给出的 2 维特征向量 [total_score, is_major_event_flag]。
             
         返回:
-            dict: 包含 final_score (最终得分) 与 action (操作指令) 的字典。
+            dict: 包含 final_score (最终得分) 与 action (操作指令)、状态特征等。
         """
+        lstm_score_scalar = lstm_features[0]
+        agent_score_scalar = agent_features[0]
+        is_major_event = agent_features[1]
         
-        # -------------------------------------------------------------
-        # 确定动态权重 (w_lstm, w_agent)
-        # -------------------------------------------------------------
-        if is_holiday_aftermath:
-            # 特例 1：长假数据断档接管
-            # 此时量价数据停留在节前，缺乏时效性，Agent 短期舆情逻辑占据绝对主导
-            w_lstm, w_agent = 0.1, 0.9
-            status = "长假数据断档接管"
-        elif abs(agent_signal) > 0.8:
-            # 特例 2：核弹级事件夺权
-            # 当发生行业颠覆级制裁、里程碑式技术突破等极端事件时，Agent 临时夺回定价权主导
-            w_lstm, w_agent = 0.3, 0.7
-            status = "核弹级事件临时夺权"
+        if self.mode == 'math':
+            result = self._fusion_math_mode(lstm_score_scalar, agent_score_scalar, is_major_event)
         else:
-            # 基础状态：常态化融合
-            # 市场平稳期，由基于量价连续演变的 LSTM 占据主要计算权重
-            w_lstm, w_agent = 0.7, 0.3
-            status = "常态化基础融合"
+            result = self._fusion_attention_mode(lstm_features, agent_features)
             
-        # -------------------------------------------------------------
-        # 计算最终得分 (Final Score)
-        # -------------------------------------------------------------
-        final_score = w_lstm * lstm_score + w_agent * agent_signal
-        
         # 将连续的 -1 到 +1 分数映射到实际的离散交易动作
+        final_score = result['final_score']
         action = self._map_score_to_action(final_score)
+        result['action'] = action
+        result['mode'] = self.mode
+        
+        return result
+        
+    def _fusion_math_mode(self, lstm_score: float, agent_score: float, is_major_event: float) -> dict:
+        """
+        模式 A (数学门控)：
+        W_event = |S_agent|^k
+        Final_score = (1 - W_event) * LSTM_score + W_event * Agent_score
+        长假断档接管（事件flag=1时）额外对 Agent 加权。
+        """
+        # 基础动态赋权公式
+        w_agent = math.pow(abs(agent_score), self.k)
+        # 确保权重不过界
+        w_agent = min(w_agent, 1.0)
+        
+        # 极端事件（宏观断档接管/核弹利好）强制拔高下限权
+        if is_major_event > 0.5:
+            w_agent = max(w_agent, 0.8)
+            status = "核弹级事件/断档接管 (Math)"
+        else:
+            status = "常态化基础融合 (Math)"
+            
+        w_lstm = 1.0 - w_agent
+        
+        final_score = w_lstm * lstm_score + w_agent * agent_score
         
         return {
             "final_score": round(final_score, 4),
-            "action": action,
             "status": status,
             "weights": {"w_lstm": w_lstm, "w_agent": w_agent}
         }
         
+    def _fusion_attention_mode(self, lstm_features: List[float], agent_features: List[float]) -> dict:
+        """
+        模式 B (注意力适配)：
+        在此逻辑中模拟论文中的交叉注意力权重对齐。
+        计算 Query(Agent) 与 Keys(LSTM) 的点积注意力分数，来隐式推断最终结合状态。
+        """
+        lstm_score = lstm_features[0]
+        agent_score = agent_features[0]
+        
+        # 伪全连接与点积计算模拟 (Attention Engine Mock)
+        # 假设我们通过计算 lstm 高维特征中的方差/激活程度来表示模型的不确定性
+        lstm_variance = sum(abs(x) for x in lstm_features[1:]) / (len(lstm_features) - 1)
+        
+        # Attention score 伪算法: 当 Agent 强度大，或者 LSTM 内部特征极度分散(不确定)时，Agent 注意力上升
+        attention_agent_raw = abs(agent_score) * 1.5 + lstm_variance * 0.5
+        attention_lstm_raw = abs(lstm_score) + 0.1  # 基础平滑
+        
+        # Softmax 归一化模拟
+        exp_agent = math.exp(attention_agent_raw)
+        exp_lstm = math.exp(attention_lstm_raw)
+        sum_exp = exp_agent + exp_lstm
+        
+        w_agent = exp_agent / sum_exp
+        w_lstm = exp_lstm / sum_exp
+        
+        final_score = w_lstm * lstm_score + w_agent * agent_score
+        
+        status = "交叉注意力对齐 (Attention)"
+        
+        return {
+            "final_score": round(final_score, 4),
+            "status": status,
+            "weights": {"w_lstm": w_lstm, "w_agent": w_agent}
+        }
+
     def _map_score_to_action(self, score: float) -> str:
         """
         将连续的分数映射为具体的离散交易信号。
-        
-        规则参考（阈值划分）：
-            score >= 0.6            -> STRONG BUY (强烈买入)
-            0.2 <= score < 0.6      -> BUY (买入)
-            -0.2 < score < 0.2      -> HOLD (持有/观望)
-            -0.6 < score <= -0.2    -> SELL (卖出)
-            score <= -0.6           -> STRONG SELL (强烈卖出)
         """
         if score >= 0.6:
             return "STRONG BUY"

@@ -3,71 +3,114 @@
 reasoning.py
 
 核心推理引擎：负责基于知识图谱与突发事件进行多跳衰减传导计算。
+完全符合面向对象及控制反转（依赖注入），不强绑定任何图谱具体实现。
 """
 
-class GraphAgent:
+from collections import deque
+from typing import Dict, List, Tuple
+
+# 引入基类以做类型提示
+from agent.mock_interfaces import BaseGraphProvider
+
+class FinancialAgent:
     """
-    基于图谱的推理 Agent，能够根据新闻冲击计算直接和间接信号。
+    负责维护状态并执行基于金融图谱逻辑的推理实体。
+    不再直接持有静态网络，而是通过依赖传入提供者。
     """
     def __init__(self, decay_lambda: float = 0.8):
         """
-        初始化 Agent。
+        初始化 Agent 及其资产记忆状态。
         
         参数:
-            decay_lambda (float): 多跳传递的衰减系数（λ），默认 0.8。
+            decay_lambda (float): 多跳传递过程中的级联衰减系数（λ），默认 0.8。
         """
         self.decay_lambda = decay_lambda
+        # 维护内存：目前跟踪 50 级节点状态池
+        self.scores: Dict[str, float] = {}
 
-    def calculate_signals(self, news_triple: dict, graph_snapshot: dict) -> dict:
+    def _get_score(self, stock: str) -> float:
+        """获取当前个股得分，处理默认0的值"""
+        return self.scores.get(stock, 0.0)
+
+    def _set_score(self, stock: str, increment: float):
+        """更新个股得分，处理默认0的值，并将结果限制在 [-1.0, 1.0]"""
+        current = self.scores.get(stock, 0.0)
+        new_score = current + increment
+        # 限制分数极值防溢出
+        self.scores[stock] = max(min(new_score, 1.0), -1.0)
+
+    def daily_decay(self):
         """
-        计算新闻对个股及产业链关联个股的综合影响信号分数。
+        每日记忆衰减（模拟 AR(1) 过程）：
+        数学公式：$S_{t} = S_{t-1} \\times \\gamma$
+        若 $|S_{t-1}| > 0.7$（意味着该笔记忆仍属于重大事件范畴），设 $\\gamma=0.95$（遗忘慢）；
+        否则 $\\gamma=0.8$（常规衰减）。
+        """
+        for stock, score in list(self.scores.items()):
+            if abs(score) > 0.7:
+                gamma = 0.95
+            else:
+                gamma = 0.8
+            self.scores[stock] = score * gamma
+
+    def propagate_impact(self, target_stock: str, initial_power: float, graph_provider: BaseGraphProvider):
+        """
+        处理突发新闻并基于 BFS 在产业链中扩散信号。
         
-        计算公式：
-        1. 直接冲击：Direct_Signal = impact_score * sentiment
-        2. 单跳传递计算：对于由图谱连接的节点，间接冲击 Indirect_Signal = Direct_Signal * base_weight * λ
+        传导公式：$Power_{next} = Power_{curr} \\times base\\_weight \\times \\lambda$
+        其中 $base\\_weight$ 自带正负属性，直接反映了上下游协同或是竞对利空。
         
         参数:
-            news_triple (dict): 包含 'target_stock', 'impact_score', 'sentiment' 的字典。
-            graph_snapshot (dict): 当前图谱结构的拓扑映射。
+            target_stock (str): 受到直接冲击（利好/利空）的首发目标个股。
+            initial_power (float): $[-1.0, 1.0]$ 新闻带来的初始冲击强度聚合分数。
+            graph_provider (BaseGraphProvider): 提供图谱网络拓扑查询的抽象接口。
+        """
+        # 记录已访问节点防止图循环死锁
+        visited = set()
+        
+        # 广度优先队栈: 存储 (当前节点名, 到达此节点的能量强度)
+        queue = deque([(target_stock, initial_power)])
+        
+        while queue:
+            current_node, current_power = queue.popleft()
+            
+            # 截断机制：如果波及到此节点的强度不足 0.05，则该波动平息，停止向下级传导
+            if abs(current_power) < 0.05:
+                continue
+                
+            if current_node in visited:
+                continue
+            
+            visited.add(current_node)
+            
+            # 将冲击量注入自身状态记忆中
+            self._set_score(current_node, current_power)
+            
+            # 使用依赖注入提供者，获取所有一级邻居
+            neighbors = graph_provider.get_neighbors(current_node)
+            
+            for nb in neighbors:
+                nb_name = nb.get("name")
+                base_weight = nb.get("base_weight", 0.0)
+                
+                if nb_name not in visited:
+                    # 计算传导波及
+                    # 公式: Power_next = Power_curr * base_weight * λ
+                    next_power = current_power * base_weight * self.decay_lambda
+                    queue.append((nb_name, next_power))
+
+    def get_feature_vectors(self, stock: str) -> List[float]:
+        """
+        输出目标股票目前的 Agent 侧提取的主观特征向量。
+        供后续网络双轨融合使用。
+        
+        参数:
+            stock (str): 目标股票名称
             
         返回:
-            dict: key 为股票名称，value 为计算得出的 agent_signal (范围 [-1.0, 1.0])。
+            List[float]: [total_score, is_major_event_flag]
+                         其中 is_major_event_flag 当 |score| > 0.7 为 1.0，否则为 0.0。
         """
-        target = news_triple.get("target_stock")
-        impact_score = news_triple.get("impact_score", 0.0)
-        sentiment = news_triple.get("sentiment", 0)
-        
-        # -------------------------------------------------------------
-        # 1. 计算直接冲击信号 (Direct_Signal)
-        # -------------------------------------------------------------
-        # 公式：Direct_Signal = impact_score * sentiment
-        direct_signal = impact_score * sentiment
-        
-        # 记录各节点分数
-        signals = {target: direct_signal}
-        
-        if target not in graph_snapshot:
-            return signals
-            
-        # -------------------------------------------------------------
-        # 2. 计算单跳衰减推理 (Indirect_Signal)
-        # -------------------------------------------------------------
-        # 查找目标股票的上游和下游节点，计算波及影响
-        relations = graph_snapshot[target]
-        all_connected = relations.get("upstream", []) + relations.get("downstream", [])
-        
-        for edge in all_connected:
-            linked_node = edge["node"]
-            base_weight = edge["base_weight"]
-            
-            # 公式：Indirect_Signal = Direct_Signal * base_weight * λ
-            indirect_signal = direct_signal * base_weight * self.decay_lambda
-            
-            # 控制上下限在 [-1.0, 1.0] 范围内，防止极值溢出
-            indirect_signal = max(min(indirect_signal, 1.0), -1.0)
-            
-            # 记录波及个股的分数
-            # （注：如果同一个节点既是上游又是下游，这里作简单的情况覆盖，实际应用中可酌情累加或求最大绝对值）
-            signals[linked_node] = indirect_signal
-            
-        return signals
+        total_score = self._get_score(stock)
+        is_major_event = 1.0 if abs(total_score) > 0.7 else 0.0
+        return [total_score, is_major_event]

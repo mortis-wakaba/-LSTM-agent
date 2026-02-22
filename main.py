@@ -87,6 +87,18 @@ def simulate_pipeline(fusion_mode='attention'):
     time.sleep(0.5)
     print("[Gateway] 📡 正在拉取底层 LSTM 特征并与 Agent 特征向量对齐计算...")
     
+    # 尝试加载环境变量并初始化大语言模型报告生成器
+    from dotenv import load_dotenv
+    from agent.llm_reporter import LLMReporter
+    load_dotenv()
+    
+    print("\n[Gateway] 🤖 正在连接 LLM 辅助决策解释引擎...")
+    try:
+        reporter = LLMReporter()
+    except Exception as e:
+        print(f"[警告] LLM 引擎初始化失败，请检查 .env 配置: {e}")
+        reporter = None
+    
     print("\n========== 最终系统生成交易指令 (Final Trade Actions) ==========")
     
     demo_stocks = ["天孚通信", "中际旭创", "算力股_01", "工业富联"]
@@ -110,6 +122,15 @@ def simulate_pipeline(fusion_mode='attention'):
         print(f"   [#] 动态门控权重 >> LSTM侧: {result['weights']['w_lstm']*100:.1f}% | Agent侧: {result['weights']['w_agent']*100:.1f}%")
         print(f"   [=>] 最终定价层对齐得分: {result['final_score']}")
         print(f"   [=>] 📊 离散化交易信号动作: ===> {result['action']} <===")
+        
+        # 4. LLM 生成自然语言报告
+        if reporter:
+            print(f"   [LLM] 📝 正在实时生成自然语言分析报告...")
+            report = reporter.get_natural_language_report(stock, result)
+            print(f"   --- 📄 【{stock}】分析报告 ---")
+            for line in report.split('\\n'):
+                print(f"   {line}")
+                
         print("-" * 75)
 
     print(f"\n[Sys] 🏁 {fusion_mode.upper()} 模式核心 Agent 中枢链路全量联测结束。")

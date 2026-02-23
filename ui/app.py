@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import os
 import glob
 import random
+import time
 import subprocess  # 引入子进程模块，用于调用你的 Jupyter Notebook
 
 # ==========================================
@@ -18,7 +19,8 @@ st.set_page_config(page_title="AI Agent 量化投研中控台", layout="wide", p
 @st.cache_data
 def load_lstm_baseline():
     """读取 LSTM 跑出来的基准预测结果"""
-    file_path = "lstm_ultimate_baseline.csv" # 假设你的 collect.ipynb 最终会生成这个文件
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(base_dir, "lstm_ultimate_baseline.csv") # 假设你的 collect.ipynb 最终会生成这个文件
     if os.path.exists(file_path):
         return pd.read_csv(file_path)
     else:
@@ -26,7 +28,9 @@ def load_lstm_baseline():
 
 def find_raw_csv_by_symbol(symbol):
     """智能匹配带标签的原始 CSV 文件 (如: 上游_AI芯片_300223_北京君正.csv)"""
-    files = glob.glob(f"stock_data_csv/*_{symbol}_*.csv") + glob.glob(f"stock_data_csv/{symbol}_*.csv")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_dir = os.path.join(base_dir, "stock_data_csv")
+    files = glob.glob(f"{csv_dir}/*_{symbol}_*.csv") + glob.glob(f"{csv_dir}/{symbol}_*.csv")
     if files:
         return files[0]
     return None
@@ -116,7 +120,9 @@ with st.sidebar:
     if st.button("🔌 启动 collect.ipynb 重新训练", type="primary", use_container_width=True):
         
         # 检查你的笔记本文件是否存在
-        if not os.path.exists("collect.ipynb"):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        collect_path = os.path.join(base_dir, "collect.ipynb")
+        if not os.path.exists(collect_path):
             st.error("❌ 找不到 collect.ipynb 文件，请确认它和 app.py 在同一个文件夹下！")
         else:
             with st.spinner("正在后台疯狂运转 collect.ipynb... 抓取数据与训练神经网络可能需要几分钟，请不要关闭页面！"):
@@ -124,7 +130,8 @@ with st.sidebar:
                     # 核心魔法：用命令行强行无头执行 Jupyter Notebook
                     # --inplace 表示直接在原文件上运行，--execute 表示执行所有单元格
                     result = subprocess.run(
-                        ["jupyter", "nbconvert", "--execute", "--inplace", "collect.ipynb"],
+                        ["jupyter", "nbconvert", "--execute", "--inplace", collect_path],
+                        cwd=base_dir,
                         capture_output=True, text=True
                     )
                     

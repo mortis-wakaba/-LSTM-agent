@@ -38,18 +38,68 @@ def load_kline_data(file_path):
     return df.tail(60)
 
 # ==========================================
-# 2. 模拟 Agent 右脑 (后续可替换为大模型 API)
+# 2. 真实 Agent 右脑推理与融合引擎 + 大模型分析
 # ==========================================
-def get_mock_agent_reasoning(symbol, name):
-    """模拟大模型阅读新闻后的情绪打分 (-10% 到 +10%)"""
-    mock_news_score = random.uniform(-0.05, 0.05) 
-    if mock_news_score > 0.02:
-        reason = f"【图谱监控】检测到 {name} 所在产业链板块有积极政策落地，Agent 判定为利好。"
-    elif mock_news_score < -0.02:
-        reason = f"【图谱监控】检测到 {name} 的上游原材料价格波动，Agent 判定为短期利空。"
+from agent.mock_interfaces import MockTeammateA
+from agent.reasoning import FinancialAgent
+from agent.dynamic_gating import FusionEngine
+from agent.llm_reporter import LLMReporter
+from dotenv import load_dotenv
+
+# 加载 .env 文件中的 API Key
+load_dotenv()
+
+# 全局单例初始化缓存，防止 Streamlit 每次刷新都重头创建
+@st.cache_resource
+def init_agent_system():
+    mock_a = MockTeammateA()
+    agent = FinancialAgent(decay_lambda=0.8)
+    fusion_engine = FusionEngine(mode='math', k=2.0)
+    
+    try:
+        reporter = LLMReporter()
+    except Exception as e:
+        reporter = None
+        print(f"[警告] LLM 引擎初始化失败，请检查 .env 配置: {e}")
+        
+    return mock_a, agent, fusion_engine, reporter
+
+mock_a, financial_agent, fusion_engine, llm_reporter = init_agent_system()
+
+def get_real_agent_reasoning(symbol, name):
+    """接入真正的多跳图谱推理引擎"""
+    # 模拟从图谱与全网监控获取当前股票的随机突发新闻作为源头输入
+    # 在真实环境中，这里应该根据 symbol 去图谱库里取真实新闻
+    news_dict = mock_a.get_latest_news() 
+    
+    # 强制让新闻目标对准当前选择的股票，以产生演示效果
+    news_dict['target_stock'] = name 
+    
+    # 触发多跳推理
+    financial_agent.propagate_impact(
+        target_stock=news_dict['target_stock'],
+        initial_power=news_dict['impact_score'],
+        graph_provider=mock_a
+    )
+    
+    # 获取该股票最终传导过来的特征分
+    agent_features = financial_agent.get_feature_vectors(name)
+    agent_return = agent_features[0]
+    is_major = agent_features[1]
+    
+    # 构造一条能够反映真实传导情况的原因文本
+    impact_text = f"【图谱传导】引爆源：{news_dict['news_text']}。"
+    if is_major:
+        impact_text += " [检测到重大宏观/断档事件接管]"
+    
+    if agent_return > 0.02:
+        reason = f"{impact_text} 多跳网络最终判定对 {name} 为结构性利好。"
+    elif agent_return < -0.02:
+        reason = f"{impact_text} 供应链波动波及，最终判定对 {name} 为短期利空。"
     else:
-        reason = f"【图谱监控】未发现 {name} 的核心产业链节点有重大突发新闻，情绪维持中性。"
-    return mock_news_score, reason
+        reason = f"{impact_text} 情绪衰减，未见重大突发波及，对 {name} 情绪维持中性。"
+        
+    return agent_features, reason
 
 # ==========================================
 # 3. 网站布局：侧边栏 (中控参数与算力引擎)
@@ -119,10 +169,17 @@ stock_row = df_baseline[df_baseline['Symbol'] == selected_symbol].iloc[0]
 last_close = stock_row['Last_Close']
 lstm_return = stock_row['LSTM_Base_Return(%)'] / 100.0 
 
-agent_return, agent_reason = get_mock_agent_reasoning(selected_symbol, selected_name)
+agent_features, agent_reason = get_real_agent_reasoning(selected_symbol, selected_name)
+agent_return = agent_features[0]
 
-# 最终预测公式
-final_return = (alpha * lstm_return) + ((1 - alpha) * agent_return)
+# 最终预测公式: 使用 FusionEngine 动态计算 (Math 模式)
+lstm_features = [lstm_return] # Math数学门控模式下，仅需要基准分即可
+fuse_result = fusion_engine.calculate_final_score(lstm_features, agent_features)
+
+final_return = fuse_result['final_score']
+trade_action = fuse_result['action']
+fusion_status = fuse_result['status']
+
 predicted_price = last_close * (1 + final_return)
 
 st.title(f"📊 {selected_name} ({selected_symbol}) - 复合量化预测看板")
@@ -130,7 +187,7 @@ st.title(f"📊 {selected_name} ({selected_symbol}) - 复合量化预测看板")
 col1, col2, col3 = st.columns(3)
 col1.metric("最新实际收盘价", f"¥ {last_close:.2f}")
 col2.metric("LSTM 纯技术面基准", f"{lstm_return*100:+.2f}%")
-col3.metric("融合预测明日价", f"¥ {predicted_price:.2f}", f"{final_return*100:+.2f}%")
+col3.metric(f"融合预测明日价 ({trade_action})", f"¥ {predicted_price:.2f}", f"{final_return*100:+.2f}%")
 
 st.divider()
 
@@ -159,7 +216,8 @@ with left_col:
 with right_col:
     st.subheader("🧠 大模型 (Agent) 决策链")
     with st.container(border=True):
-        st.markdown(f"**Agent 独立情绪打分:** `{agent_return*100:+.2f}%`")
+        st.markdown(f"**Agent 情绪多跳推演因子:** `{agent_return*100:+.2f}%`")
+        st.info(f"**引擎当前激活状态:** {fusion_status}")
         st.success(agent_reason)
         
     mermaid_code = f"""
@@ -169,3 +227,23 @@ with right_col:
         style TARGET fill:#f9f,stroke:#333,stroke-width:4px
     """
     st.markdown(f"```mermaid\n{mermaid_code}\n```")
+
+# ==========================================
+# 5. 生成专业 AI 投资研报
+# ==========================================
+st.divider()
+st.subheader("🤖 AI 投资研报生成器")
+st.caption("基于 DeepSeek 大模型，结合量价左脑与图谱情绪右脑的综合评估结果，自动为您撰写投研报告。")
+
+if st.button("✨ 生成最新个股研报", type="primary", use_container_width=True):
+    if llm_reporter:
+        with st.spinner(f"正在全网深度分析 {selected_name} 的异动传导与技术面，撰写专业报告中，请稍候..."):
+            try:
+                report_text = llm_reporter.get_natural_language_report(selected_symbol, fuse_result)
+                st.markdown("### 📄 自动生成研报")
+                with st.container(border=True):
+                    st.markdown(report_text)
+            except Exception as e:
+                st.error(f"❌ 大模型接口调用失败或返回异常: {e}")
+    else:
+        st.error("⚠️ LLMReporter 组件未成功加载。请检查项目根目录下是否存在 `.env` 文件且含有正确的 `LLM_API_KEY`。")

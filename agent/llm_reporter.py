@@ -44,23 +44,23 @@ class LLMReporter:
         """
         prompt = f"""你是一个资深的量化金融分析师，你的主要任务是将我们AI投资系统的机器输出参数转化成通俗易懂、逻辑严密的自然语言投资报告。
 
-目前针对股票【{stock}】的AI融合模型评估结果如下：
-- 模型评估量化总分 (Final Score)：{fusion_result.get('final_score')} (范围在 -1.0 到 1.0 之间，1.0为最强买入信号)
-- 系统给出的交易动作 (Action)：{fusion_result.get('action')} (选项包含 STRONG BUY, BUY, HOLD, SELL, STRONG SELL)
-- 融合引擎当前触发的状态 (Status)：{fusion_result.get('status')}
-- 使用的融合策略模式 (Mode)：{fusion_result.get('mode')}
-- 权重分配 (Weights)：
-  * 纯量化/LSTM 侧权重 (w_lstm)：{fusion_result.get('weights', {}).get('w_lstm')}
-  * 多跳图谱/事件 Agent 侧权重 (w_agent)：{fusion_result.get('weights', {}).get('w_agent')}
+                目前针对股票【{stock}】的AI融合模型评估结果如下：
+                - 模型评估量化总分 (Final Score)：{fusion_result.get('final_score')} (范围在 -1.0 到 1.0 之间，1.0为最强买入信号)
+                - 系统给出的交易动作 (Action)：{fusion_result.get('action')} (选项包含 STRONG BUY, BUY, HOLD, SELL, STRONG SELL)
+                - 融合引擎当前触发的状态 (Status)：{fusion_result.get('status')}
+                - 使用的融合策略模式 (Mode)：{fusion_result.get('mode')}
+                - 权重分配 (Weights)：
+                * 纯量化/LSTM 侧权重 (w_lstm)：{fusion_result.get('weights', {}).get('w_lstm')}
+                * 多跳图谱/事件 Agent 侧权重 (w_agent)：{fusion_result.get('weights', {}).get('w_agent')}
 
-要求：
-1. 第一部分直接给出交易结论（Action）与个股评级。
-2. 第二部分根据“评估量化总分”以及“触发状态（Status）”和“权重分配”，解释做出该决策的核心原因。
-   如果是“核弹级事件/断档接管”，请着重强调近期强突发影响超越了技术结构。
-   如果是常规模式/交叉注意力等模式，请说明技术面评估（LSTM）和事件信息传导（Agent）是如何有机结合且谁占主导的。
-3. 语言需专业、客观，作为研究分享使用，并在末尾加入适当且简短的风险提示。
-4. 整体输出格式要求清晰，不要过于冗长。
-"""
+                要求：
+                1. 第一部分直接给出交易结论（Action）与个股评级。
+                2. 第二部分根据“评估量化总分”以及“触发状态（Status）”和“权重分配”，解释做出该决策的核心原因。
+                如果是“核弹级事件/断档接管”，请着重强调近期强突发影响超越了技术结构。
+                如果是常规模式/交叉注意力等模式，请说明技术面评估（LSTM）和事件信息传导（Agent）是如何有机结合且谁占主导的。
+                3. 语言需专业、客观，作为研究分享使用，并在末尾加入适当且简短的风险提示。
+                4. 整体输出格式要求清晰，不要过于冗长。
+                """
         return prompt
 
     def get_natural_language_report(self, stock: str, fusion_result: Dict[str, Any]) -> str:

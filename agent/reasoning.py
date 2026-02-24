@@ -10,7 +10,19 @@ from collections import deque
 from typing import Dict, List, Tuple
 
 # 引入基类以做类型提示
-from agent.mock_interfaces import BaseGraphProvider
+from abc import ABC, abstractmethod
+
+class BaseGraphProvider(ABC):
+    """
+    抽象图谱提供者基类。
+    强制解耦 Agent 逻辑与底层图谱的具体实现。
+    """
+    @abstractmethod
+    def get_neighbors(self, node_name: str) -> List[Dict]:
+        """
+        获取节点的直接相邻节点信息。
+        """
+        pass
 
 class FinancialAgent:
     """

@@ -44,7 +44,7 @@ def load_kline_data(file_path):
 # ==========================================
 # 2. 真实 Agent 右脑推理与融合引擎 + 大模型分析
 # ==========================================
-from agent.mock_interfaces import MockTeammateA
+from knowledge_graph.graph_adapter import RealGraphProvider
 from agent.reasoning import FinancialAgent
 from agent.dynamic_gating import FusionEngine
 from agent.llm_reporter import LLMReporter
@@ -56,7 +56,7 @@ load_dotenv()
 # 全局单例初始化缓存，防止 Streamlit 每次刷新都重头创建
 @st.cache_resource
 def init_agent_system():
-    mock_a = MockTeammateA()
+    mock_a = RealGraphProvider()
     agent = FinancialAgent(decay_lambda=0.8)
     fusion_engine = FusionEngine(mode='math', k=2.0)
     

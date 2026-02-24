@@ -15,9 +15,10 @@ import io
 # 强制输出设为 utf-8，防止 Windows GBK 终端下特殊表情符号报错
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from agent.mock_interfaces import MockTeammateA, MockTeammateC
+from agent.mock_interfaces import MockTeammateC
 from agent.reasoning import FinancialAgent
 from agent.dynamic_gating import FusionEngine
+from knowledge_graph.graph_adapter import RealGraphProvider
 
 def print_banner():
     banner = """
@@ -34,7 +35,9 @@ def simulate_pipeline(fusion_mode='attention'):
     print(f"\n[Sys] 🤖 引导程序启动中... (预选融合网络模式: {fusion_mode.upper()})")
     time.sleep(0.5)
     
-    mock_a = MockTeammateA()
+    mock_a = RealGraphProvider()  # 真实知识图谱（替代 MockTeammateA）
+    # 注入一条演示新闻事件
+    mock_a.add_news_event("寒武纪", 0.95, "重磅利好：国产AI芯片突破性进展，算力硬件需求暴增！")
     mock_c = MockTeammateC()
     financial_agent = FinancialAgent(decay_lambda=0.8)
     fusion_engine = FusionEngine(mode=fusion_mode, k=2.0)
@@ -101,7 +104,7 @@ def simulate_pipeline(fusion_mode='attention'):
     
     print("\n========== 最终系统生成交易指令 (Final Trade Actions) ==========")
     
-    demo_stocks = ["天孚通信", "中际旭创", "算力股_01", "工业富联"]
+    demo_stocks = ["寒武纪", "中际旭创", "浪潮信息", "海康威视"]
     
     for stock in demo_stocks:
         # 1. 获取模型特征 (64-d) 和 Agent 提纯特征 (2-d)

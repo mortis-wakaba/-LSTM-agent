@@ -53,17 +53,16 @@ class FinancialAgent:
 
     def daily_decay(self):
         """
-        每日记忆衰减（模拟 AR(1) 过程）：
-        数学公式：$S_{t} = S_{t-1} \\times \\gamma$
-        若 $|S_{t-1}| > 0.7$（意味着该笔记忆仍属于重大事件范畴），设 $\\gamma=0.95$（遗忘慢）；
-        否则 $\\gamma=0.8$（常规衰减）。
+        每日记忆衰减（平滑化版本）：
+        使用 Tanh 双曲正切函数进行连续映射：
+        当事件绝对值极小（如 0.0）时，衰减率下限为 0.8
+        当事件绝对值极大（趋于 1.0）时，衰减率上限逼近 0.95
         """
+        import math
         for stock, score in list(self.scores.items()):
-            if abs(score) > 0.7:
-                gamma = 0.95
-            else:
-                gamma = 0.8
-            self.scores[stock] = score * gamma
+            # 基于事件强度的动态阻尼
+            dynamic_gamma = 0.80 + 0.15 * math.tanh(abs(score) * 2.0)
+            self.scores[stock] = score * dynamic_gamma
 
     def propagate_impact(self, target_stock: str, initial_power: float, graph_provider: BaseGraphProvider):
         """
@@ -124,5 +123,4 @@ class FinancialAgent:
                          其中 is_major_event_flag 当 |score| > 0.7 为 1.0，否则为 0.0。
         """
         total_score = self._get_score(stock)
-        is_major_event = 1.0 if abs(total_score) > 0.7 else 0.0
-        return [total_score, is_major_event]
+        return [total_score]

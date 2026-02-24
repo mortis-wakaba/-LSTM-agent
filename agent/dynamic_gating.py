@@ -33,17 +33,16 @@ class FusionEngine:
         参数:
             lstm_features (List[float]): LSTM 模型的 64 维隐状态输出向量。
                                          我们约定第 0 维代表趋势主预测分 [-1.0, 1.0]。
-            agent_features (List[float]): Agent 给出的 2 维特征向量 [total_score, is_major_event_flag]。
+            agent_features (List[float]): Agent 给出的 1 维特征向量 [total_score]。
             
         返回:
             dict: 包含 final_score (最终得分) 与 action (操作指令)、状态特征等。
         """
         lstm_score_scalar = lstm_features[0]
         agent_score_scalar = agent_features[0]
-        is_major_event = agent_features[1]
         
         if self.mode == 'math':
-            result = self._fusion_math_mode(lstm_score_scalar, agent_score_scalar, is_major_event)
+            result = self._fusion_math_mode(lstm_score_scalar, agent_score_scalar)
         else:
             result = self._fusion_attention_mode(lstm_features, agent_features)
             
@@ -55,22 +54,21 @@ class FusionEngine:
         
         return result
         
-    def _fusion_math_mode(self, lstm_score: float, agent_score: float, is_major_event: float) -> dict:
+    def _fusion_math_mode(self, lstm_score: float, agent_score: float) -> dict:
         """
         模式 A (数学门控)：
         W_event = |S_agent|^k
         Final_score = (1 - W_event) * LSTM_score + W_event * Agent_score
-        长假断档接管（事件flag=1时）额外对 Agent 加权。
         """
         # 基础动态赋权公式
         w_agent = math.pow(abs(agent_score), self.k)
         # 确保权重不过界
         w_agent = min(w_agent, 1.0)
         
-        # 极端事件（宏观断档接管/核弹利好）强制拔高下限权
-        if is_major_event > 0.5:
+        # 利用自身连续打分（而非离散标志位）决定接管阈值
+        if abs(agent_score) > 0.7:
             w_agent = max(w_agent, 0.8)
-            status = "核弹级事件/断档接管 (Math)"
+            status = "重大事件/断档接管 (Math)"
         else:
             status = "常态化基础融合 (Math)"
             
@@ -122,14 +120,15 @@ class FusionEngine:
     def _map_score_to_action(self, score: float) -> str:
         """
         将连续的分数映射为具体的离散交易信号。
+        (阈值由历史网格搜索回测寻优产生)
         """
-        if score >= 0.6:
+        if score >= 0.80:
             return "STRONG BUY"
-        elif score >= 0.2:
+        elif score >= 0.10:
             return "BUY"
-        elif score > -0.2:
+        elif score > -0.40:
             return "HOLD"
-        elif score > -0.6:
+        elif score > -0.80:
             return "SELL"
         else:
             return "STRONG SELL"

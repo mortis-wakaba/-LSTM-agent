@@ -89,12 +89,9 @@ def get_real_agent_reasoning(symbol, name):
     # 获取该股票最终传导过来的特征分
     agent_features = financial_agent.get_feature_vectors(name)
     agent_return = agent_features[0]
-    is_major = agent_features[1]
     
     # 构造一条能够反映真实传导情况的原因文本
     impact_text = f"【图谱传导】引爆源：{news_dict['news_text']}。"
-    if is_major:
-        impact_text += " [检测到重大宏观/断档事件接管]"
     
     if agent_return > 0.02:
         reason = f"{impact_text} 多跳网络最终判定对 {name} 为结构性利好。"

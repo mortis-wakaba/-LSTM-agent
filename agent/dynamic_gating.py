@@ -13,7 +13,7 @@ class FusionEngine:
     """
     负责动态权重分配与最终买卖量化信号映射的引挚。
     """
-    def __init__(self, mode: str = 'math', k: float = 2.0):
+    def __init__(self, mode: str = 'math', k: float = 0.5):
         """
         初始化动态门控引擎。
         
@@ -122,13 +122,13 @@ class FusionEngine:
         将连续的分数映射为具体的离散交易信号。
         (阈值由历史网格搜索回测寻优产生)
         """
-        if score >= 0.50:
+        if score >= 0.40:
             return "STRONG BUY"
         elif score >= 0.15:
             return "BUY"
         elif score > -0.40:
             return "HOLD"
-        elif score > -0.80:
+        elif score > -0.70:
             return "SELL"
         else:
             return "STRONG SELL"

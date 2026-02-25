@@ -44,23 +44,28 @@ def generate_real_backtest_data():
         for _, row in df.iterrows():
             lstm_mock_score = row['lstm_score']
             
-            # Agent 新闻是稀疏的，偶尔发生大偏差
+            # Agent 新闻是稀疏的，偶尔发生大偏差 (假定我们的大模型准确率为 65%)
             agent_mock_score = 0.0
-            if random.random() < 0.1: # 10%的概率有突发新闻
-                agent_mock_score = random.uniform(-1.0, 1.0)
-                
-            # 按照 Fusion Engine 逻辑，如果发生了大新闻，Agent 权重升高
-            w_agent = min(math.pow(abs(agent_mock_score), 2.0), 1.0)
-            if abs(agent_mock_score) > 0.7:
-                w_agent = max(w_agent, 0.8)
-                
-            w_lstm = 1.0 - w_agent
-            final_score = w_lstm * lstm_mock_score + w_agent * agent_mock_score
-            
             next_ret = row['True_Next_Return']
+            
+            if random.random() < 0.1: # 10%的概率有突发新闻
+                accuracy_chance = random.random()
+                if next_ret > 0:
+                    if accuracy_chance < 0.65:
+                        agent_mock_score = random.uniform(0.1, 1.0)  # 预测准确，看多
+                    else:
+                        agent_mock_score = random.uniform(-1.0, -0.1) # 预测错误，看空
+                else:
+                    if accuracy_chance < 0.65:
+                        agent_mock_score = random.uniform(-1.0, -0.1) # 预测准确，看空
+                    else:
+                        agent_mock_score = random.uniform(0.1, 1.0)   # 预测错误，看多
+                
+            # 我们在回测池中仅仅提取出未融合的代理信号
+            # 真正的 score 会在循环寻找 k 时动态计算
             # 过滤掉涨跌停板以上的无效跳空数据（如果是极端数据）
             if abs(next_ret) < 0.21: 
-                data.append((final_score, next_ret))
+                data.append((lstm_mock_score, agent_mock_score, next_ret))
                 
     except Exception as e:
         print(f"   [错误] 处理预测数据异常: {e}")
@@ -68,9 +73,9 @@ def generate_real_backtest_data():
     print(f"   [系统] 成功提取了 {len(data)} 条真实深度学习历史日线验证集交易样本！")
     return data
 
-def simulate_sharpe_ratio(data, thresholds):
+def simulate_sharpe_ratio(data, k_param, thresholds):
     """
-    给定阈值，跑一遍回测，计算策略的简易夏普率或总收益
+    给定融合参数 k 和 交易阈值，跑一遍回测，计算策略的简易夏普率或总收益
     thresholds 格式：(strong_buy_th, buy_th, sell_th, strong_sell_th)
     要求: strong_buy > buy > sell > strong_sell
     """
@@ -80,16 +85,24 @@ def simulate_sharpe_ratio(data, thresholds):
         
     portfolio_returns = []
     
-    for score, true_ret in data:
-        # 执行动作决策
+    for lstm_mock_score, agent_mock_score, true_ret in data:
+        # 1. 动态生成 final_score
+        w_agent = min(math.pow(abs(agent_mock_score), k_param), 1.0)
+        if abs(agent_mock_score) > 0.7:
+            w_agent = max(w_agent, 0.8)
+            
+        w_lstm = 1.0 - w_agent
+        final_score = w_lstm * lstm_mock_score + w_agent * agent_mock_score
+        
+        # 2. 执行动作决策
         position = 0.0
-        if score >= s_buy:
+        if final_score >= s_buy:
             position = 1.0     # 强力看多，满仓
-        elif score >= buy:
+        elif final_score >= buy:
             position = 0.5     # 轻仓试盘
-        elif score > sell:
+        elif final_score > sell:
             position = 0.0     # 空仓观望 (Hold)
-        elif score > s_sell:
+        elif final_score > s_sell:
             position = -0.5    # 轻仓融券做空
         else:
             position = -1.0    # 强力看空，满仓做空
@@ -113,10 +126,14 @@ def grid_search_thresholds(data):
     
     # 构建超参数遍历空间 (Hyperparameter Space)
     # 取值范围：
+    # k: 控制 Agent 的放大比例，我们将搜索的颗粒度切细一点
     # s_buy: 0.4 到 0.8
     # buy:   0.1 到 0.4
     # sell: -0.4 到 -0.1
     # s_sell: -0.8 到 -0.4
+    
+    # 增加 k 的网格，从非常不信任(0.5)到非常信任(3.5)，步长 0.5
+    k_range = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
     s_buy_range = [0.4, 0.5, 0.6, 0.7, 0.8]
     buy_range = [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]
     sell_range = [-0.1, -0.15, -0.2, -0.25, -0.3, -0.4]
@@ -124,27 +141,30 @@ def grid_search_thresholds(data):
     
     best_sharpe = -999.0
     best_thresh = None
+    best_k = 2.0
     
-    total_combinations = len(s_buy_range) * len(buy_range) * len(sell_range) * len(s_sell_range)
-    print(f"📊 即将验证的参数组合总数: {total_combinations} 次跑批")
+    total_combinations = len(k_range) * len(s_buy_range) * len(buy_range) * len(sell_range) * len(s_sell_range)
+    print(f"📊 即将验证的参数组合总数 (5维空间): {total_combinations} 次跑批")
     
     count = 0
-    for sb in s_buy_range:
-        for b in buy_range:
-            for s in sell_range:
-                for ss in s_sell_range:
-                    count += 1
-                    thresh = (sb, b, s, ss)
-                    sharpe = simulate_sharpe_ratio(data, thresh)
-                    
-                    if sharpe > best_sharpe:
-                        best_sharpe = sharpe
-                        best_thresh = thresh
+    for k in k_range:
+        for sb in s_buy_range:
+            for b in buy_range:
+                for s in sell_range:
+                    for ss in s_sell_range:
+                        count += 1
+                        thresh = (sb, b, s, ss)
+                        sharpe = simulate_sharpe_ratio(data, k, thresh)
                         
-                    if count % 200 == 0:
-                        print(f"   执行进度: {count} / {total_combinations} ...")
-                        
-    return best_thresh, best_sharpe
+                        if sharpe > best_sharpe:
+                            best_sharpe = sharpe
+                            best_thresh = thresh
+                            best_k = k
+                            
+                        if count % 1000 == 0:
+                            print(f"   执行进度: {count} / {total_combinations} ...")
+                            
+    return best_k, best_thresh, best_sharpe
 
 if __name__ == "__main__":
     import time
@@ -172,11 +192,11 @@ if __name__ == "__main__":
             break
         
         print(f"\n🔍 步骤2/2: 执行超空间网格扫描以寻找夏普最优截断点 ({i+1}/{N_ITERATIONS})...")
-        best_t, best_s = grid_search_thresholds(real_data)
+        best_k, best_t, best_s = grid_search_thresholds(real_data)
         
         if best_t is not None:
-            best_thresholds_history.append(best_t)
-            print(f"   [迭代 {i+1} 最佳结果] Thresholds: {best_t}, Max Sharpe: {best_s:.4f}")
+            best_thresholds_history.append((best_k, *best_t))
+            print(f"   [迭代 {i+1} 最佳结果] K={best_k:.2f}, Thresholds: {best_t}, Max Sharpe: {best_s:.4f}")
         else:
             print(f"   [迭代 {i+1}] 未找到有效参数。")
 
@@ -185,29 +205,25 @@ if __name__ == "__main__":
     print("✅ 【全局参数寻优完成】Optimal Thresholds Found!")
     
     if best_thresholds_history:
-        # 整理历史最佳寻找稳定点 (取中位数或平均值)
-        # s_buy_range = [0.4, 0.5, 0.6, 0.7, 0.8]
-        # buy_range = [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]
-        # sell_range = [-0.1, -0.15, -0.2, -0.25, -0.3, -0.4]
-        # s_sell_range = [-0.4, -0.5, -0.6, -0.7, -0.8]
-        
-        # 使用中位数对极端随机情况更鲁棒
-        final_s_buy = np.median([t[0] for t in best_thresholds_history])
-        final_buy = np.median([t[1] for t in best_thresholds_history])
-        final_sell = np.median([t[2] for t in best_thresholds_history])
-        final_s_sell = np.median([t[3] for t in best_thresholds_history])
+        # 包含 k 的 5 个参数找稳定点
+        final_k = np.median([x[0] for x in best_thresholds_history])
+        final_s_buy = np.median([x[1] for x in best_thresholds_history])
+        final_buy = np.median([x[2] for x in best_thresholds_history])
+        final_sell = np.median([x[3] for x in best_thresholds_history])
+        final_s_sell = np.median([x[4] for x in best_thresholds_history])
         
         import json
-        with open("best_t.json", "w", encoding="utf-8") as f:
+        with open("best_k_t.json", "w", encoding="utf-8") as f:
             json.dump({
                 "history": best_thresholds_history,
-                "final": [final_s_buy, final_buy, final_sell, final_s_sell]
+                "final": [final_k, final_s_buy, final_buy, final_sell, final_s_sell]
             }, f, indent=4)
-        print("\n   [建议固化进入 dynamic_gating.py 的硬核交易阈值 (基于10次迭代中位数)]")
-        print(f"   STRONG BUY  >= {final_s_buy:.2f}    (原设定为 0.60)")
-        print(f"   BUY         >= {final_buy:.2f}    (原设定为 0.20)")
-        print(f"   SELL         < {final_sell:.2f}    (原设定为 -0.20)")
-        print(f"   STRONG SELL  < {final_s_sell:.2f}    (原设定为 -0.60)")
+        print("\n   [建议固化进入 dynamic_gating.py 的硬核交易参数 (基于10次迭代中位数)]")
+        print(f"   Math Mode 放大系数 (k): {final_k:.2f}    (原设定为 2.00)")
+        print(f"   STRONG BUY       >= {final_s_buy:.2f}    (原设定为 0.50)")
+        print(f"   BUY              >= {final_buy:.2f}    (原设定为 0.15)")
+        print(f"   SELL              < {final_sell:.2f}    (原设定为 -0.40)")
+        print(f"   STRONG SELL       < {final_s_sell:.2f}    (原设定为 -0.80)")
     else:
         print("未收集到足够的阈值数据。")
         

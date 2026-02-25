@@ -122,9 +122,9 @@ class FusionEngine:
         将连续的分数映射为具体的离散交易信号。
         (阈值由历史网格搜索回测寻优产生)
         """
-        if score >= 0.80:
+        if score >= 0.50:
             return "STRONG BUY"
-        elif score >= 0.10:
+        elif score >= 0.15:
             return "BUY"
         elif score > -0.40:
             return "HOLD"

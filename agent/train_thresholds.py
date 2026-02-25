@@ -21,64 +21,51 @@ import pandas as pd
 
 def generate_real_backtest_data():
     """
-    使用真实的 A 股历史 K 线数据构建回测集。
-    我们依靠过去的动量特征（模拟 LSTM）和随机情绪（模拟 Agent 新闻）来合成当时的系统打分，
-    并使用明天的真实涨跌幅 (next_day_pct_change) 作为真正的奖励反馈。
+    使用真实的 LSTM 历史预测数据和真实标签来寻找阈值。
+    对于 Agent 的动态融合，我们依然使用稀疏随机注入来模拟具有一定准确率的新闻信号。
     """
-    print("   [系统] 正在加载所有 50 只股票的真实历史 K 线数据...")
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_dir = os.path.join(base_dir, "ui", "stock_data_csv")
-    csv_files = glob.glob(os.path.join(csv_dir, "*.csv"))
+    print("   [系统] 正在加载真实 LSTM测试集预测结果...")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    hist_file = os.path.join(base_dir, "lstm_historical_predictions.csv")
     
-    if not csv_files:
-        print("   [错误] 在 ui/stock_data_csv/ 未找到数据！")
+    if not os.path.exists(hist_file):
+        print(f"   [错误] 未找到历史预测文件：{hist_file}")
         return []
         
     data = []
     
-    for file in csv_files:
-        try:
-            df = pd.read_csv(file)
-            if len(df) < 10:
-                continue
+    try:
+        df = pd.read_csv(hist_file)
+        # 将 LSTM 的收益率预测转化为 -1.0 到 1.0 的打分
+        # 假设 10% 的预测涨跌幅作为上下限，乘以 10 映射到 [-1.0, 1.0]
+        # 这是为了适配 dynamic_gating 里的模型假设分数范围
+        df['lstm_score'] = (df['LSTM_Pred_Return'] * 10).clip(lower=-1.0, upper=1.0)
+        
+        for _, row in df.iterrows():
+            lstm_mock_score = row['lstm_score']
+            
+            # Agent 新闻是稀疏的，偶尔发生大偏差
+            agent_mock_score = 0.0
+            if random.random() < 0.1: # 10%的概率有突发新闻
+                agent_mock_score = random.uniform(-1.0, 1.0)
                 
-            # 找到明天的真实涨跌幅作为基准（也就是我们今天收盘后预测，明天去赚的钱）
-            # pct_change 是百分比 (比如 3.5 代表 3.5%)，我们转为小数 0.035
-            df['next_ret'] = df['pct_change'].shift(-1) / 100.0
-            
-            # 使用近 5 日累计收益率的平滑值来替代 LSTM 模型基准分
-            df['momentum_5d'] = df['pct_change'].rolling(5).mean() / 100.0
-            
-            df = df.dropna()
-            
-            for _, row in df.iterrows():
-                # 模拟系统预测打分：
-                # 我们假设系统对均值回归/动量有一定的捕捉能力（这里简化为动量 + 一点噪音）
-                # 真实情况 LSTM 会输出一个 [-1.0, 1.0] 的置信度
-                lstm_mock_score = min(max(row['momentum_5d'] * 5, -1.0), 1.0)
+            # 按照 Fusion Engine 逻辑，如果发生了大新闻，Agent 权重升高
+            w_agent = min(math.pow(abs(agent_mock_score), 2.0), 1.0)
+            if abs(agent_mock_score) > 0.7:
+                w_agent = max(w_agent, 0.8)
                 
-                # Agent 新闻是稀疏的，偶尔发生大偏差
-                agent_mock_score = 0.0
-                if random.random() < 0.1: # 10%的概率有突发新闻
-                    agent_mock_score = random.uniform(-1.0, 1.0)
-                    
-                # 按照 Fusion Engine 逻辑，如果发生了大新闻，Agent 权重升高
-                w_agent = min(math.pow(abs(agent_mock_score), 2.0), 1.0)
-                if abs(agent_mock_score) > 0.7:
-                    w_agent = max(w_agent, 0.8)
-                    
-                w_lstm = 1.0 - w_agent
-                final_score = w_lstm * lstm_mock_score + w_agent * agent_mock_score
-                
-                next_ret = row['next_ret']
-                # 过滤掉真实的涨跌停板无效数据（如果是 0 或者极端值）
-                if abs(next_ret) < 0.21: 
-                    data.append((final_score, next_ret))
-                    
-        except Exception as e:
-            continue
+            w_lstm = 1.0 - w_agent
+            final_score = w_lstm * lstm_mock_score + w_agent * agent_mock_score
             
-    print(f"   [系统] 成功提取了 {len(data)} 条真实历史日线交易样本！")
+            next_ret = row['True_Next_Return']
+            # 过滤掉涨跌停板以上的无效跳空数据（如果是极端数据）
+            if abs(next_ret) < 0.21: 
+                data.append((final_score, next_ret))
+                
+    except Exception as e:
+        print(f"   [错误] 处理预测数据异常: {e}")
+            
+    print(f"   [系统] 成功提取了 {len(data)} 条真实深度学习历史日线验证集交易样本！")
     return data
 
 def simulate_sharpe_ratio(data, thresholds):

@@ -66,21 +66,20 @@ STOCK_CONTEXT = _build_stock_context()
 #  Prompt 模板
 # =====================================================================
 
-SYSTEM_PROMPT = f"""从新闻中提取股票池内公司之间的关系，输出JSON数组。禁止输出任何解释文字。
+SYSTEM_PROMPT = f"""你是JSON提取器。从新闻中提取股票池内公司之间的关系。
 
-股票池（50只，其他公司忽略）：{STOCK_CONTEXT}
+规则：
+1. 只输出JSON数组，禁止任何其他文字
+2. 只关注以下50只股票之间的关系：{STOCK_CONTEXT}
+3. 关系类型（5选1）：supply=供应链(有向)、compete=竞争、peer=板块联动、invest=控股(有向)、cooperate=合作
+4. sentiment∈[-1,1]：正=利好，负=利空
+5. 无关系输出[]
 
-关系类型（5选1）：supply=供应链(有向,source→target)、compete=竞争(无向)、peer=板块联动(无向)、invest=控股(有向)、cooperate=合作(无向)
+JSON格式：[{{"source":"股票代码","target":"股票代码","relation":"类型","sentiment":数值,"description":"一句话"}}]"""
 
-sentiment∈[-1,1]：正=利好，负=利空，绝对值=强度
+USER_PROMPT_TEMPLATE = """新闻：{news_text}
 
-输出格式（严格遵守）：
-[{{"source":"代码","target":"代码","relation":"类型","sentiment":数值,"description":"一句话"}}]
-无关系则输出[]"""
-
-USER_PROMPT_TEMPLATE = """{news_text}
-
-提取上述新闻中的公司关系，只输出JSON："""
+输出JSON："""
 
 
 # =====================================================================
@@ -99,19 +98,49 @@ class NewsAnalyzer:
         )
         self.model = model
 
-    def analyze(self, news_text: str) -> list[dict]:
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            messages=[
-                {"role": "user", "content": SYSTEM_PROMPT + "\n\n" + USER_PROMPT_TEMPLATE.format(news_text=news_text)},
-            ],
-        )
-        raw = message.content[0].text.strip()
-        return self._parse_response(raw)
+    def analyze(self, news_text: str, max_retries: int = 2) -> list[dict]:
+        for attempt in range(max_retries):
+            try:
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=512,
+                    system=SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": USER_PROMPT_TEMPLATE.format(news_text=news_text)},
+                        {"role": "assistant", "content": "["},
+                    ],
+                )
+                raw = "[" + message.content[0].text.strip()
+                result = self._parse_response(raw)
+                if result or "[]" in raw or raw.strip() == "[]":
+                    return result
+            except Exception:
+                pass
+        return []
 
-    def analyze_batch(self, news_list: list[str]) -> list[list[dict]]:
-        return [self.analyze(news) for news in news_list]
+    def analyze_batch_multi(self, news_items: list[str]) -> list[dict]:
+        """批量分析多条新闻（一次API调用），返回合并的关系列表"""
+        numbered = "\n".join(f"{i+1}. {t[:150]}" for i, t in enumerate(news_items))
+        prompt = f"以下{len(news_items)}条新闻，提取所有公司关系，合并输出一个JSON数组：\n{numbered}\n\n输出JSON："
+
+        for attempt in range(2):
+            try:
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": "["},
+                    ],
+                )
+                raw = "[" + message.content[0].text.strip()
+                result = self._parse_response(raw)
+                if result is not None:
+                    return result
+            except Exception:
+                pass
+        return []
 
     def _parse_response(self, raw: str) -> list[dict]:
         """解析 LLM 返回的 JSON，容忍混入的解释文字"""
@@ -133,7 +162,7 @@ class NewsAnalyzer:
             except json.JSONDecodeError:
                 pass
 
-        # 策略3：找 [ 到 ] 之间
+        # 策略3：找 [ 到 ] 之间（贪心匹配最外层）
         start = raw.find("[")
         end = raw.rfind("]")
         if start != -1 and end != -1 and end > start:
@@ -144,7 +173,15 @@ class NewsAnalyzer:
             except json.JSONDecodeError:
                 pass
 
-        print(f"警告: JSON 解析失败，原始输出:\n{raw[:200]}...")
+        # 策略4：找 { 到 } 单个对象
+        m = re.search(r'\{[^{}]*"source"[^{}]*"target"[^{}]*\}', raw)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+                return self._validate([obj])
+            except json.JSONDecodeError:
+                pass
+
         return []
 
     def _validate(self, results: list) -> list[dict]:

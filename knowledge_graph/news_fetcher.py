@@ -1,16 +1,18 @@
 """
 个股新闻抓取模块
 
-数据源（两个接口合并去重）:
-  1. 东方财富 np-listapi  — 个股关联资讯流（行情/资金类偏多）
-  2. AKShare stock_news_em — 关键词搜索（事件/深度报道偏多，对LLM更有价值）
-  3. 东方财富 np-anotice   — 公司公告
+数据源（四个接口合并去重）:
+  1. 东方财富搜索API（curl_cffi）— 按关键词搜索，可翻页，覆盖~半年
+  2. 东方财富 np-listapi  — 个股关联资讯流（近1个月，~200条）
+  3. AKShare stock_news_em — 关键词搜索（近2周，带正文内容）
+  4. 东方财富 np-anotice   — 公司公告（可翻页，覆盖数年）
 """
 
 import json
 import os
 import re
 import time
+import random
 import warnings
 
 import pandas as pd
@@ -28,6 +30,87 @@ _session.headers.update({"User-Agent": "Mozilla/5.0"})
 def _market_prefix(code: str) -> str:
     """上交所=1, 深交所=0"""
     return "1" if code.startswith(("6",)) else "0"
+
+
+def fetch_news_search(keyword: str, max_pages: int = 30, page_size: int = 50,
+                      stock_code: str = "") -> list[dict]:
+    """东方财富搜索API — 按关键词搜索新闻，支持翻页，覆盖~半年历史
+
+    使用 curl_cffi 模拟浏览器 TLS 指纹，绕过反爬。
+    """
+    from curl_cffi import requests as cffi_requests
+    from urllib.parse import quote
+
+    url = "https://search-api-web.eastmoney.com/search/jsonp"
+    ts = int(time.time() * 1000)
+    cb = f"jQuery3510{random.randint(1000000000, 9999999999)}_{ts}"
+    headers = {
+        "accept": "*/*",
+        "cookie": "qgqp_b_id=652bf4c98a74e210088f372a17d4e27b",
+        "referer": f"https://so.eastmoney.com/news/s?keyword={quote(keyword)}",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+    all_news = []
+    seen_titles = set()
+
+    for page in range(1, max_pages + 1):
+        inner_param = {
+            "uid": "", "keyword": keyword,
+            "type": ["cmsArticleWebOld"],
+            "client": "web", "clientType": "web", "clientVersion": "curr",
+            "param": {
+                "cmsArticleWebOld": {
+                    "searchScope": "default", "sort": "default",
+                    "pageIndex": page, "pageSize": page_size,
+                    "preTag": "<em>", "postTag": "</em>",
+                }
+            },
+        }
+        params = {
+            "cb": cb,
+            "param": json.dumps(inner_param, ensure_ascii=False),
+            "_": str(ts + page),
+        }
+
+        try:
+            r = cffi_requests.get(url, params=params, headers=headers,
+                                  impersonate="chrome", timeout=15)
+            text = r.text
+            start = text.index("(") + 1
+            end = text.rindex(")")
+            data = json.loads(text[start:end])
+            result = data.get("result", {}).get("cmsArticleWebOld", {})
+            items = result.get("list", []) if isinstance(result, dict) else result if isinstance(result, list) else []
+        except Exception:
+            break
+
+        if not items:
+            break
+
+        for it in items:
+            title = it.get("title", "").replace("<em>", "").replace("</em>", "")
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                content = it.get("content", "").replace("<em>", "").replace("</em>", "")
+                content = re.sub(r"\u3000", "", content)
+                content = re.sub(r"\r\n", " ", content)
+                all_news.append({
+                    "stock_code": stock_code or keyword,
+                    "title": title,
+                    "time": it.get("date", ""),
+                    "source": it.get("mediaName", ""),
+                    "url": f"http://finance.eastmoney.com/a/{it.get('code', '')}.html",
+                    "content": content,
+                    "news_type": _classify_news(title),
+                })
+
+        if len(items) < page_size:
+            break
+
+        time.sleep(0.3)
+
+    return all_news
 
 
 def fetch_news_listapi(code: str, page_size: int = 20) -> list[dict]:
@@ -93,30 +176,58 @@ def fetch_news_akshare(code: str) -> list[dict]:
     return results
 
 
-def fetch_announcements(code: str, page_size: int = 10) -> list[dict]:
-    """东方财富公司公告"""
-    url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-    params = {
-        "page_size": page_size,
-        "page_index": 1,
-        "ann_type": "A",
-        "stock_list": code,
-        "f_node": 0,
-        "s_node": 0,
-    }
-    r = _session.get(url, params=params, verify=False, timeout=15)
-    data = r.json()
-    items = data.get("data", {}).get("list", [])
-    return [
-        {
-            "stock_code": code,
-            "title": it.get("title", ""),
-            "time": it.get("notice_date", ""),
-            "source": "公告",
-            "url": "",
+def fetch_announcements(code: str, page_size: int = 100, max_pages: int = 10,
+                        start_date: str = "") -> list[dict]:
+    """东方财富公司公告（支持翻页，可获取数年历史数据）
+
+    Args:
+        start_date: 最早日期，格式 "2025-01-01"，为空则不限制
+    """
+    all_items = []
+    seen_titles = set()
+
+    for page in range(1, max_pages + 1):
+        params = {
+            "page_size": page_size,
+            "page_index": page,
+            "ann_type": "A",
+            "stock_list": code,
+            "f_node": 0,
+            "s_node": 0,
         }
-        for it in items
-    ]
+        try:
+            r = _session.get(
+                "https://np-anotice-stock.eastmoney.com/api/security/ann",
+                params=params, verify=False, timeout=15,
+            )
+            data = r.json()
+            items = data.get("data", {}).get("list", [])
+        except Exception:
+            break
+
+        if not items:
+            break
+
+        for it in items:
+            title = it.get("title", "").strip()
+            date_str = it.get("notice_date", "")
+
+            # 按日期过滤
+            if start_date and date_str and date_str[:10] < start_date:
+                return all_items
+
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                all_items.append({
+                    "stock_code": code,
+                    "title": title,
+                    "time": date_str,
+                    "source": "公告",
+                    "url": "",
+                    "news_type": _classify_news(title),
+                })
+
+    return all_items
 
 
 _DATA_PATTERNS = [

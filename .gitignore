@@ -13,8 +13,9 @@ bin/
 lib/
 
 /data/*.csv
-/data/*.json
 /data/*.xlsx
+# 保留 LLM 提取的关系数据（动态图谱启动时需要）
+!/data/all_extracted_relations.json
 *.zip
 *.tar.gz
 

@@ -7,40 +7,55 @@ llm_reporter.py
 """
 
 import os
-from openai import OpenAI
+from pathlib import Path
+import anthropic
 from typing import Dict, Any
+
+# 读取 knowledge_graph/.env 统一配置
+_ENV_FILE = Path(__file__).resolve().parent.parent / "knowledge_graph" / ".env"
+
+def _load_env() -> dict[str, str]:
+    config = {}
+    if _ENV_FILE.exists():
+        for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, value = line.split("=", 1)
+                config[key.strip()] = value.strip()
+    return config
 
 class LLMReporter:
     """
     接收最终门控计算出来的信号字典，将其拼接成 Prompt 交由 LLM 转换为人类可读的投资建议报告。
     """
-    def __init__(self, api_key: str = None, model: str = "deepseek-chat", base_url: str = None):
+    def __init__(self, api_key: str = None, model: str = "claude-haiku-4-5-20251001", base_url: str = None):
         """
         初始化 LLM 报告生成器。
-        
+
         参数:
-            api_key (str): 大模型 API 密钥。如果为空则默认从环境变量读取 LLM_API_KEY。
+            api_key (str): 大模型 API 密钥。如果为空则从 .env 或环境变量读取。
             model (str): 使用的 LLM 模型名称。
-            base_url (str): API 的基准 URL。如果为空则默认从环境变量读取 LLM_BASE_URL。
+            base_url (str): API 的基准 URL。如果为空则从 .env 或环境变量读取。
         """
-        self.api_key = api_key or os.getenv("LLM_API_KEY")
-        self.base_url = base_url or os.getenv("LLM_BASE_URL")
-        
+        config = _load_env()
+        self.api_key = api_key or config.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        self.base_url = base_url or config.get("ANTHROPIC_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
+
         if not self.api_key:
-            raise ValueError("未找到 API_KEY，请提供 api_key 参数或设置 LLM_API_KEY 环境变量。")
-            
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            raise ValueError("未找到 API_KEY，请在 knowledge_graph/.env 中配置 ANTHROPIC_API_KEY。")
+
+        self.client = anthropic.Anthropic(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            auth_token=None,
+        )
         self.model = model
 
     def generate_prompt(self, stock: str, fusion_result: Dict[str, Any]) -> str:
         """
         构造用于请求 LLM 的提示词 (Prompt)。
-        
-        参数:
-            stock (str): 目标股票名称
-            fusion_result (Dict): 融合引擎计算结果的字典
-        返回:
-            str: 格式化后的 Prompt 字符串
         """
         prompt = f"""你是一个资深的量化金融分析师，你的主要任务是将我们AI投资系统的机器输出参数转化成通俗易懂、逻辑严密的自然语言投资报告。
 
@@ -55,8 +70,8 @@ class LLMReporter:
 
                 要求：
                 1. 第一部分直接给出交易结论（Action）与个股评级。
-                2. 第二部分根据“评估量化总分”以及“触发状态（Status）”和“权重分配”，解释做出该决策的核心原因。
-                如果是“核弹级事件/断档接管”，请着重强调近期强突发影响超越了技术结构。
+                2. 第二部分根据"评估量化总分"以及"触发状态（Status）"和"权重分配"，解释做出该决策的核心原因。
+                如果是"核弹级事件/断档接管"，请着重强调近期强突发影响超越了技术结构。
                 如果是常规模式/交叉注意力等模式，请说明技术面评估（LSTM）和事件信息传导（Agent）是如何有机结合且谁占主导的。
                 3. 语言需专业、客观，作为研究分享使用，并在末尾加入适当且简短的风险提示。
                 4. 整体输出格式要求清晰，不要过于冗长。
@@ -66,31 +81,22 @@ class LLMReporter:
     def get_natural_language_report(self, stock: str, fusion_result: Dict[str, Any]) -> str:
         """
         调用 LLM API 生成自然语言投资报告。
-        
-        参数:
-            stock (str): 目标股票名称
-            fusion_result (Dict): 动态门控融合模块输出的字典
-        返回:
-            str: LLM 生成的自然语言报告
         """
         prompt = self.generate_prompt(stock, fusion_result)
-        
+
         try:
-            response = self.client.chat.completions.create(
+            message = self.client.messages.create(
                 model=self.model,
+                max_tokens=600,
                 messages=[
-                    {"role": "system", "content": "你是一位专注于人工智能选股与量化分析的金融分析师。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": "你是一位专注于人工智能选股与量化分析的金融分析师。\n\n" + prompt}
                 ],
-                temperature=0.7,
-                max_tokens=600
             )
-            return response.choices[0].message.content.strip()
+            return message.content[0].text.strip()
         except Exception as e:
             return f"LLM API 调用失败: {str(e)}"
 
 if __name__ == "__main__":
-    # 展示测试示例 (需替换为真实 API_KEY 执行)
     mock_fusion_res = {
         "final_score": 0.8521,
         "status": "核弹级事件/断档接管 (Math)",
@@ -98,19 +104,14 @@ if __name__ == "__main__":
         "action": "STRONG BUY",
         "mode": "math"
     }
-    
-    # 提取真实或默认配置以进行测试
-    from dotenv import load_dotenv
-    load_dotenv()
-    
-    # 直接传入真实的 api_key 和 base_url 参数
+
     reporter = LLMReporter()
-    print("-------------------- 构造的提示词如下 --------------------\\n")
+    print("-------------------- 构造的提示词如下 --------------------\n")
     print(reporter.generate_prompt("英伟达 (NVDA)", mock_fusion_res))
-    print("\\n----------------------------------------------------------")
-    
-    print("\\n\\n正在调用 LLM API 进行真实的自然语言生成测试，请稍候...")
+    print("\n----------------------------------------------------------")
+
+    print("\n\n正在调用 LLM API 进行真实的自然语言生成测试，请稍候...")
     report = reporter.get_natural_language_report("英伟达 (NVDA)", mock_fusion_res)
-    print("\\n-------------------- 生成的自然语言报告 --------------------\\n")
+    print("\n-------------------- 生成的自然语言报告 --------------------\n")
     print(report)
-    print("\\n----------------------------------------------------------")
+    print("\n----------------------------------------------------------")

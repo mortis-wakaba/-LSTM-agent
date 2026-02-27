@@ -72,12 +72,11 @@ mock_a, financial_agent, fusion_engine, llm_reporter = init_agent_system()
 
 def get_real_agent_reasoning(symbol, name):
     """接入真正的多跳图谱推理引擎"""
-    # 模拟从图谱与全网监控获取当前股票的随机突发新闻作为源头输入
-    # 在真实环境中，这里应该根据 symbol 去图谱库里取真实新闻
-    news_dict = mock_a.get_latest_news() 
-    
-    # 强制让新闻目标对准当前选择的股票，以产生演示效果
-    news_dict['target_stock'] = name 
+    # 从图谱中获取当前股票的相关新闻事件
+    news_dict = mock_a.get_latest_news(stock_name=name)
+
+    # 确保新闻目标对准当前选择的股票
+    news_dict['target_stock'] = name
     
     # 触发多跳推理
     financial_agent.propagate_impact(
@@ -237,7 +236,7 @@ with right_col:
 # ==========================================
 st.divider()
 st.subheader("🤖 AI 投资研报生成器")
-st.caption("基于 DeepSeek 大模型，结合量价左脑与图谱情绪右脑的综合评估结果，自动为您撰写投研报告。")
+st.caption("基于 Claude 大模型，结合量价左脑与图谱情绪右脑的综合评估结果，自动为您撰写投研报告。")
 
 if st.button("✨ 生成最新个股研报", type="primary", use_container_width=True):
     if llm_reporter:

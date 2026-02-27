@@ -14,6 +14,9 @@
     mock_a = RealGraphProvider()
 """
 
+import json
+from pathlib import Path
+
 from knowledge_graph.dynamic_graph import DynamicKnowledgeGraph
 from knowledge_graph.stock_pool import get_all_stocks_flat, get_all_codes
 
@@ -25,6 +28,8 @@ DEFAULT_RELATION_WEIGHT = {
     "invest":    0.85,   # 控股强正相关
     "cooperate": 0.6,    # 合作正相关
 }
+
+_DEFAULT_RELATIONS_FILE = Path(__file__).resolve().parent.parent / "data" / "all_extracted_relations.json"
 
 
 class RealGraphProvider:
@@ -45,6 +50,7 @@ class RealGraphProvider:
             self._code_to_name[code] = name
 
         self._news_cache: list[dict] = []
+        self._load_news_from_relations()
 
     # ---- 核心接口：兼容 BaseGraphProvider ----
 
@@ -81,14 +87,22 @@ class RealGraphProvider:
             snapshot[name] = self.get_neighbors(code)
         return snapshot
 
-    def get_latest_news(self, scenario: str = "default") -> dict:
-        """返回最新新闻事件。"""
+    def get_latest_news(self, stock_name: str = "") -> dict:
+        """返回最新新闻事件。如果指定 stock_name，优先返回该股票的新闻。"""
+        if stock_name and self._news_cache:
+            # 优先找该股票相关的新闻
+            code = self._resolve_code(stock_name)
+            name = self._code_to_name.get(code, stock_name) if code else stock_name
+            for item in self._news_cache:
+                if item["target_stock"] == name or item["target_stock"] == stock_name:
+                    return item
+
         if self._news_cache:
             top = max(self._news_cache, key=lambda x: abs(x.get("impact_score", 0)))
             return top
 
         return {
-            "target_stock": "寒武纪",
+            "target_stock": stock_name or "寒武纪",
             "impact_score": 0.0,
             "news_text": "暂无新闻数据，请先运行 news_pipeline 获取实时新闻。",
         }
@@ -129,3 +143,35 @@ class RealGraphProvider:
         if abs(sentiment) > 0.01:
             return round(sentiment, 4)
         return DEFAULT_RELATION_WEIGHT.get(relation_type, 0.3)
+
+    def _load_news_from_relations(self):
+        """启动时从 all_extracted_relations.json 加载新闻事件到 _news_cache"""
+        if not _DEFAULT_RELATIONS_FILE.exists():
+            return
+        try:
+            with open(_DEFAULT_RELATIONS_FILE, encoding="utf-8") as f:
+                relations = json.load(f)
+        except Exception:
+            return
+
+        # 按 from_stock 分组，计算每只股票的平均 sentiment 和最新新闻
+        stock_sents: dict[str, list[float]] = {}
+        stock_news: dict[str, str] = {}
+        for r in relations:
+            stock = r.get("from_stock", "")
+            if not stock:
+                continue
+            stock_sents.setdefault(stock, []).append(float(r.get("sentiment", 0)))
+            # 保留最后一条描述
+            desc = r.get("description", r.get("news_title", ""))
+            if desc:
+                stock_news[stock] = desc
+
+        for code, sents in stock_sents.items():
+            name = self._code_to_name.get(code, code)
+            avg_sent = sum(sents) / len(sents)
+            self._news_cache.append({
+                "target_stock": name,
+                "impact_score": round(avg_sent, 3),
+                "news_text": stock_news.get(code, ""),
+            })

@@ -9,6 +9,9 @@
   - reset_to_base() 重置到初始状态
 """
 
+import json
+from pathlib import Path
+
 import torch
 from torch_geometric.data import Data
 
@@ -19,11 +22,14 @@ from knowledge_graph.graph_builder import (
     get_code_to_idx,
 )
 
+# 默认关系文件路径
+_DEFAULT_RELATIONS_FILE = Path(__file__).resolve().parent.parent / "data" / "all_extracted_relations.json"
+
 
 class DynamicKnowledgeGraph:
     """维护一个可动态更新的图谱状态"""
 
-    def __init__(self):
+    def __init__(self, auto_load: bool = True):
         self._code_to_idx = get_code_to_idx()
         self._num_nodes = len(self._code_to_idx)
 
@@ -37,6 +43,39 @@ class DynamicKnowledgeGraph:
 
         # 动态删除的边（记录 (source, target) 对，用于从基础边中排除）
         self._removed_edges: set[tuple[str, str]] = set()
+
+        if auto_load:
+            self.load_extracted_relations()
+
+    def load_extracted_relations(self, path: str | Path | None = None) -> int:
+        """从 all_extracted_relations.json 加载 LLM 提取的关系到动态边。
+
+        对同一 (source, target, relation) 的重复边，取 sentiment 均值聚合。
+        返回实际新增的边数。
+        """
+        fpath = Path(path) if path else _DEFAULT_RELATIONS_FILE
+        if not fpath.exists():
+            return 0
+
+        with open(fpath, encoding="utf-8") as f:
+            raw_relations = json.load(f)
+
+        # 聚合：(source, target, relation) → [sentiments]
+        agg: dict[tuple[str, str, str], list[float]] = {}
+        for r in raw_relations:
+            key = (r.get("source", ""), r.get("target", ""), r.get("relation", ""))
+            if not all(key):
+                continue
+            agg.setdefault(key, []).append(float(r.get("sentiment", 0.0)))
+
+        added = 0
+        for (src, tgt, rel), sents in agg.items():
+            avg_sent = sum(sents) / len(sents)
+            desc = f"LLM提取(n={len(sents)},avg_sent={avg_sent:.2f})"
+            if self.add_edge(src, tgt, rel, description=desc, sentiment=avg_sent):
+                added += 1
+
+        return added
 
     def add_edge(
         self,

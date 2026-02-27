@@ -16,12 +16,19 @@ lib/
 /data/*.xlsx
 # 保留 LLM 提取的关系数据（动态图谱启动时需要）
 !/data/all_extracted_relations.json
+# 保留消融实验结果和 Agent 历史打分
+!/data/ablation_study.csv
+!/data/historical_agent_scores.csv
+!/data/aligned_relations.json
+!/data/lstm_historical_predictions.csv
 *.zip
 *.tar.gz
 
 *.pth
 *.pt
 *.ckpt
+# 保留已训练的交叉注意力模型权重
+!/data/cross_attention_weights.pth
 *.h5
 *.bin
 /models/

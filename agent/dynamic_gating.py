@@ -8,23 +8,68 @@ dynamic_gating.py
 
 import math
 from typing import List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CrossAttentionGate(nn.Module):
+    """
+    基于 PyTorch 的交叉注意力门控机制 (Cross-Attention Gating)。
+    接收 LSTM 的 64 维隐藏状态特征作为 Query/Key，Agent 特征作为 Value 构建动态融合权重。
+    """
+    def __init__(self, lstm_hidden_dim=64, agent_dim=1):
+        super().__init__()
+        # 用于对齐维度的线性投影层
+        self.agent_proj = nn.Linear(agent_dim, lstm_hidden_dim)
+        
+        # 将融合特征转换为注意力的线性层
+        self.attention_net = nn.Sequential(
+            nn.Linear(lstm_hidden_dim * 2, 32),
+            nn.ReLU(),
+            nn.Linear(32, 2) # 输出 2 维：[w_lstm_raw, w_agent_raw]
+        )
+        
+    def forward(self, lstm_h: torch.Tensor, agent_score: torch.Tensor):
+        """
+        lstm_h: [batch, 64]
+        agent_score: [batch, 1]
+        返回: 归一化后的注意力权重 [batch, 2] -> (w_lstm, w_agent)
+        """
+        # 将 agent 1维特征投影到与 LSTM 相同的 64 维子空间
+        agent_h = self.agent_proj(agent_score)
+        
+        # 计算特征交叉
+        # 在这里，我们将 LSTM 状态和投影后的 Agent 状态进行拼接
+        combined = torch.cat([lstm_h, agent_h], dim=-1)
+        
+        # 生成注意力并归一化
+        attn_logits = self.attention_net(combined)
+        weights = F.softmax(attn_logits, dim=-1)
+        
+        return weights
 
 class FusionEngine:
     """
     负责动态权重分配与最终买卖量化信号映射的引挚。
     """
-    def __init__(self, mode: str = 'math', k: float = 0.5):
+    def __init__(self, mode: str = 'math', k: float = 2.0, load_attention_weights: str = None):
         """
         初始化动态门控引擎。
         
         参数:
             mode (str): 'math' 为数学公式门控，'attention' 为双轨注意力适配。
             k (float): 数学模式下的超参数，用于控制 Agent 分数的非线性放大力度。
+            load_attention_weights (str): 预训练的 CrossAttentionGate 权重路径
         """
         if mode not in ['math', 'attention']:
             raise ValueError("mode 必须是 'math' 或 'attention'")
         self.mode = mode
         self.k = k
+        
+        self.attention_gate = CrossAttentionGate(lstm_hidden_dim=64, agent_dim=1)
+        if load_attention_weights and mode == 'attention':
+            self.attention_gate.load_state_dict(torch.load(load_attention_weights))
+        self.attention_gate.eval() # 默认推理模式
 
     def calculate_final_score(self, lstm_features: List[float], agent_features: List[float]) -> dict:
         """
@@ -85,31 +130,30 @@ class FusionEngine:
     def _fusion_attention_mode(self, lstm_features: List[float], agent_features: List[float]) -> dict:
         """
         模式 B (注意力适配)：
-        在此逻辑中模拟论文中的交叉注意力权重对齐。
-        计算 Query(Agent) 与 Keys(LSTM) 的点积注意力分数，来隐式推断最终结合状态。
+        如果可用，使用 PyTorch 的 CrossAttentionGate 推理出融合权重。
         """
         lstm_score = lstm_features[0]
         agent_score = agent_features[0]
         
-        # 伪全连接与点积计算模拟 (Attention Engine Mock)
-        # 假设我们通过计算 lstm 高维特征中的方差/激活程度来表示模型的不确定性
-        lstm_variance = sum(abs(x) for x in lstm_features[1:]) / (len(lstm_features) - 1)
+        # 兼容老的回测如果只有 1 维 (无隐藏状态)，回退到原始 mock
+        if len(lstm_features) == 1:
+            return self._fusion_math_mode(lstm_score, agent_score)
+            
+        # 提取 64 维隐藏状态
+        hidden_states = lstm_features[1:]
         
-        # Attention score 伪算法: 当 Agent 强度大，或者 LSTM 内部特征极度分散(不确定)时，Agent 注意力上升
-        attention_agent_raw = abs(agent_score) * 1.5 + lstm_variance * 0.5
-        attention_lstm_raw = abs(lstm_score) + 0.1  # 基础平滑
-        
-        # Softmax 归一化模拟
-        exp_agent = math.exp(attention_agent_raw)
-        exp_lstm = math.exp(attention_lstm_raw)
-        sum_exp = exp_agent + exp_lstm
-        
-        w_agent = exp_agent / sum_exp
-        w_lstm = exp_lstm / sum_exp
+        # 转换为张量进行推理
+        with torch.no_grad():
+            lstm_h_tensor = torch.tensor([hidden_states], dtype=torch.float32)
+            agent_score_tensor = torch.tensor([[agent_score]], dtype=torch.float32)
+            
+            weights = self.attention_gate(lstm_h_tensor, agent_score_tensor)[0].numpy()
+            
+        w_lstm = float(weights[0])
+        w_agent = float(weights[1])
         
         final_score = w_lstm * lstm_score + w_agent * agent_score
-        
-        status = "交叉注意力对齐 (Attention)"
+        status = "交叉注意力对齐 (Neural)"
         
         return {
             "final_score": round(final_score, 4),

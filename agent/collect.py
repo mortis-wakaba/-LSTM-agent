@@ -190,11 +190,15 @@ class UltimateStockLSTM(nn.Module):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(DEVICE)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(DEVICE)
         
-        out, _ = self.lstm(x, (h0, c0))
+        out, (hn, _) = self.lstm(x, (h0, c0))
+        # hn shape: (num_layers, batch_size, hidden_size)
+        # We want the hidden state of the last layer:
+        hidden_state = hn[-1, :, :] 
+        
         out = out[:, -1, :] 
         out = self.layer_norm(out) 
         out = self.fc(out)
-        return out
+        return out, hidden_state
 
 # ==========================================
 # 3. 稳健的数据流水线
@@ -273,7 +277,7 @@ def train_and_predict_single(file_path, seq_length=20, epochs=100):
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        outputs = model(X_train)
+        outputs, _ = model(X_train)
         loss = criterion(outputs, y_train)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -285,22 +289,24 @@ def train_and_predict_single(file_path, seq_length=20, epochs=100):
     with torch.no_grad():
         # 获取测试集上的预测得分
         if len(X_test) > 0:
-            preds_scaled = model(X_test)
+            preds_scaled, hidden_states = model(X_test)
             preds_return = scaler_y.inverse_transform(preds_scaled.cpu().numpy())
             actuals_return = scaler_y.inverse_transform(y_test.cpu().numpy())
+            hidden_states_np = hidden_states.cpu().numpy()
             
             for i in range(len(preds_return)):
                 historical_preds.append({
                     "Date": test_dates[i].strftime('%Y-%m-%d'),
                     "Symbol": symbol,
                     "LSTM_Pred_Return": float(preds_return[i][0]),
-                    "True_Next_Return": float(actuals_return[i][0])
+                    "True_Next_Return": float(actuals_return[i][0]),
+                    "Hidden_State_64": hidden_states_np[i].tolist()
                 })
         
         latest_window = scaled_X_full[-seq_length:]
         latest_window_tensor = torch.tensor(latest_window, dtype=torch.float32).unsqueeze(0).to(DEVICE)
         
-        pred_scaled = model(latest_window_tensor)
+        pred_scaled, _ = model(latest_window_tensor)
         pred_return = scaler_y.inverse_transform(pred_scaled.cpu().numpy())[0][0]
         pred_price = last_close * (1 + pred_return)
         

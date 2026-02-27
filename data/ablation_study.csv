@@ -1,0 +1,4 @@
+Model,IC,F1_Score,Sharpe,MDD,Net_Value
+Pure_LSTM,-0.0192,0.3698,0.0,0.0,1.0
+Math_Gating_k2.0,0.1644,0.645,1.5663,-0.9411,47.6636
+CrossAttention,0.1426,0.6435,1.3139,-0.8204,5.9468

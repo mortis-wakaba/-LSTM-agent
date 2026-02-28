@@ -84,9 +84,9 @@ def simulate_sharpe_ratio(data, k_param, thresholds):
     portfolio_returns = []
     prev_pos = 0.0
     
-    COMMISSION = 0.0003
-    SLIPPAGE   = 0.001
-    STAMP_TAX  = 0.001
+    COMMISSION = 0.0003   # 券商佣金：单边万三
+    SLIPPAGE   = 0.0002   # 预估滑点/冲击成本：单边万分之二
+    STAMP_TAX  = 0.0005   # 印花税：卖出时万分之五 (2023.8.28 减半征收新规)
     
     for lstm_mock_score, agent_mock_score, true_ret in data:
         # 1. 动态生成 final_score

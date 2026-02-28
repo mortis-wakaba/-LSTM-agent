@@ -78,8 +78,8 @@ def search_best_k(data_dir):
     results = []
 
     COMMISSION = 0.0003   # 券商佣金：单边万三
-    SLIPPAGE   = 0.001    # 滑点/冲击成本：单边千分之一
-    STAMP_TAX  = 0.001    # 印花税：卖出时千分之一
+    SLIPPAGE   = 0.0002   # 预估滑点/冲击成本：单边万分之二
+    STAMP_TAX  = 0.0005   # 印花税：卖出时万分之五 (2023.8.28 减半征收新规)
 
     for k in k_candidates:
         pnl = []

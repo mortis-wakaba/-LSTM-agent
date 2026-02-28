@@ -66,9 +66,21 @@ def calc_f1(predictions, true_returns):
 
 
 def simulate_trades(final_scores, true_returns, thresholds):
-    """根据融合分数和阈值模拟交易，返回每日盈亏列表"""
+    """
+    根据融合分数和阈值模拟交易，返回每日盈亏列表。
+    交易摩擦模型（贴近 A 股真实成本）：
+      - 券商佣金：单边 0.03%
+      - 印花税：卖出时 0.1%
+      - 滑点/冲击成本：单边 0.1%
+    仅在仓位发生变化时计费（持仓不动不扣费）。
+    """
     s_buy, buy, sell, s_sell = thresholds
     daily_pnl = []
+    prev_pos = 0.0  # 追踪前一天的仓位
+
+    COMMISSION = 0.0003   # 券商佣金：单边万三
+    STAMP_TAX  = 0.001    # 印花税：卖出时千分之一
+    SLIPPAGE   = 0.001    # 滑点/冲击成本：单边千分之一
 
     for score, true_ret in zip(final_scores, true_returns):
         # 按 5 档阈值映射仓位
@@ -77,8 +89,20 @@ def simulate_trades(final_scores, true_returns, thresholds):
         elif score > sell:     pos = 0.0    # 空仓观望
         elif score > s_sell:   pos = -0.5   # 轻仓做空
         else:                  pos = -1.0   # 强力看空，满仓做空
-        # 扣除万分之二手续费
-        daily_pnl.append(pos * true_ret - abs(pos) * 0.0002)
+
+        # 计算仓位变动量
+        pos_change = abs(pos - prev_pos)
+        
+        # 交易成本 = 仅在换仓时收取
+        cost = 0.0
+        if pos_change > 0:
+            cost += pos_change * (COMMISSION + SLIPPAGE)  # 买入/加仓成本
+            # 如果是减仓（前仓位比新仓位大），需要加印花税
+            if pos < prev_pos:
+                cost += abs(prev_pos - pos) * STAMP_TAX
+
+        daily_pnl.append(pos * true_ret - cost)
+        prev_pos = pos
 
     return daily_pnl
 
@@ -104,11 +128,15 @@ def run_ablation(data_dir, k_math=2.0):
     lstm_df = pd.read_csv(lstm_file)
     agent_df = pd.read_csv(agent_file)
 
-    # 按时间排序，取后 20% 作为测试集（与 train_fusion.py 完全一致）
-    lstm_df.sort_values(by='Date', inplace=True)
-    split_idx = int(len(lstm_df) * 0.8)
-    split_date = lstm_df.iloc[split_idx]['Date']
-    test_lstm = lstm_df[lstm_df['Date'] >= split_date].copy()
+    # 仅使用盲测集数据进行最终消融评估（绝对不在此数据上调参）
+    if 'Split' in lstm_df.columns:
+        test_lstm = lstm_df[lstm_df['Split'] == 'test'].copy()
+    else:
+        # 兼容旧版无 Split 列的 CSV
+        lstm_df.sort_values(by='Date', inplace=True)
+        split_idx = int(len(lstm_df) * 0.8)
+        split_date = lstm_df.iloc[split_idx]['Date']
+        test_lstm = lstm_df[lstm_df['Date'] >= split_date].copy()
 
     test_lstm['Date'] = pd.to_datetime(test_lstm['Date'])
     agent_df['date'] = pd.to_datetime(agent_df['date'])
@@ -149,7 +177,10 @@ def run_ablation(data_dir, k_math=2.0):
     # 模型 1: 纯 LSTM（不融合 Agent 信号）
     pred_lstm = lstm_scores.copy()
 
-    # 模型 2: 数学启发式门控（W_agent = |S_agent|^k）
+    # 模型 2: 纯 Agent 图谱（不融合 LSTM 信号，直接使用图谱情绪分数）
+    pred_agent = agent_scores.copy()
+
+    # 模型 3: 数学启发式门控（W_agent = |S_agent|^k）
     pred_math = np.zeros(len(merged))
     for i in range(len(merged)):
         w_ag = min(math.pow(abs(agent_scores[i]), k_math), 1.0)
@@ -158,13 +189,14 @@ def run_ablation(data_dir, k_math=2.0):
             w_ag = max(w_ag, 0.8)
         pred_math[i] = (1.0 - w_ag) * lstm_scores[i] + w_ag * agent_scores[i]
 
-    # 模型 3: 交叉注意力门控（神经网络动态权重）
+    # 模型 4: 交叉注意力门控（神经网络动态权重）
     pred_attn = w_lstm_attn * lstm_scores + w_agent_attn * agent_scores
 
     # --- 模拟交易 ---
-    thresholds = (0.5, 0.15, -0.4, -0.8)  # 阈值由网格搜索寻优产生
+    thresholds = (0.8, 0.1, -0.1, -0.4)  # 由验证集上的真实数据网格搜索产生（无前视偏差）
 
     pnl_lstm = simulate_trades(pred_lstm, y_true, thresholds)
+    pnl_agent = simulate_trades(pred_agent, y_true, thresholds)
     pnl_math = simulate_trades(pred_math, y_true, thresholds)
     pnl_attn = simulate_trades(pred_attn, y_true, thresholds)
 
@@ -183,6 +215,7 @@ def run_ablation(data_dir, k_math=2.0):
 
     results = pd.DataFrame([
         build_row("Pure_LSTM", pred_lstm, pnl_lstm),
+        build_row("Pure_Agent", pred_agent, pnl_agent),
         build_row(f"Math_Gating_k{k_math}", pred_math, pnl_math),
         build_row("CrossAttention", pred_attn, pnl_attn),
     ])
@@ -199,4 +232,4 @@ def run_ablation(data_dir, k_math=2.0):
 if __name__ == "__main__":
     base_dir = r"c:\Users\mortis\Desktop\ai4f\-LSTM-agent"
     data_dir = os.path.join(base_dir, "data")
-    run_ablation(data_dir, k_math=2.0)
+    run_ablation(data_dir, k_math=3.1)

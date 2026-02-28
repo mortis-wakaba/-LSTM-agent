@@ -21,56 +21,54 @@ import pandas as pd
 
 def generate_real_backtest_data():
     """
-    使用真实的 LSTM 历史预测数据和真实标签来寻找阈值。
-    对于 Agent 的动态融合，我们依然使用稀疏随机注入来模拟具有一定准确率的新闻信号。
+    使用真实的 LSTM 历史预测数据和真实的 Agent 知识图谱打分来寻找最优阈值。
+    不再使用随机模拟的 Agent 分数，确保网格搜索结果与实际数据分布严格对齐。
     """
-    print("   [系统] 正在加载真实 LSTM测试集预测结果...")
+    print("   [系统] 正在加载真实 LSTM 预测和真实 Agent 打分数据...")
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    hist_file = os.path.join(base_dir, "lstm_historical_predictions.csv")
+    lstm_file = os.path.join(base_dir, "data", "lstm_historical_predictions.csv")
+    agent_file = os.path.join(base_dir, "data", "historical_agent_scores.csv")
     
-    if not os.path.exists(hist_file):
-        print(f"   [错误] 未找到历史预测文件：{hist_file}")
-        return []
+    for f in [lstm_file, agent_file]:
+        if not os.path.exists(f):
+            print(f"   [错误] 未找到文件：{f}")
+            return []
         
     data = []
     
     try:
-        df = pd.read_csv(hist_file)
-        # 将 LSTM 的收益率预测转化为 -1.0 到 1.0 的打分
-        # 假设 10% 的预测涨跌幅作为上下限，乘以 10 映射到 [-1.0, 1.0]
-        # 这是为了适配 dynamic_gating 里的模型假设分数范围
-        df['lstm_score'] = (df['LSTM_Pred_Return'] * 10).clip(lower=-1.0, upper=1.0)
+        lstm_df = pd.read_csv(lstm_file)
+        agent_df = pd.read_csv(agent_file)
         
-        for _, row in df.iterrows():
-            lstm_mock_score = row['lstm_score']
+        # 三段式划分：仅使用验证集数据进行超参数网格搜索
+        if 'Split' in lstm_df.columns:
+            lstm_df = lstm_df[lstm_df['Split'] == 'val']
+            print(f"   [系统] 已筛选验证集数据 (Split='val')，共 {len(lstm_df)} 条")
+        
+        # 按日期和股票代码内连接，确保 LSTM 预测与 Agent 打分严格对齐
+        lstm_df['Date'] = pd.to_datetime(lstm_df['Date'])
+        agent_df['date'] = pd.to_datetime(agent_df['date'])
+        
+        merged = pd.merge(
+            lstm_df, agent_df,
+            left_on=['Date', 'Symbol'], right_on=['date', 'stock_code'],
+            how='inner'
+        )
+        print(f"   [系统] LSTM 与 Agent 数据对齐完成，有效样本: {len(merged)} 条")
+        
+        for _, row in merged.iterrows():
+            lstm_score = float(row['LSTM_Pred_Return'])
+            agent_score = float(row['total_score'])  # 真实的 Agent 知识图谱打分
+            next_ret = float(row['True_Next_Return'])
             
-            # Agent 新闻是稀疏的，偶尔发生大偏差 (假定我们的大模型准确率为 65%)
-            agent_mock_score = 0.0
-            next_ret = row['True_Next_Return']
-            
-            if random.random() < 0.1: # 10%的概率有突发新闻
-                accuracy_chance = random.random()
-                if next_ret > 0:
-                    if accuracy_chance < 0.65:
-                        agent_mock_score = random.uniform(0.1, 1.0)  # 预测准确，看多
-                    else:
-                        agent_mock_score = random.uniform(-1.0, -0.1) # 预测错误，看空
-                else:
-                    if accuracy_chance < 0.65:
-                        agent_mock_score = random.uniform(-1.0, -0.1) # 预测准确，看空
-                    else:
-                        agent_mock_score = random.uniform(0.1, 1.0)   # 预测错误，看多
-                
-            # 我们在回测池中仅仅提取出未融合的代理信号
-            # 真正的 score 会在循环寻找 k 时动态计算
-            # 过滤掉涨跌停板以上的无效跳空数据（如果是极端数据）
+            # 过滤掉涨跌停板以上的无效跳空数据
             if abs(next_ret) < 0.21: 
-                data.append((lstm_mock_score, agent_mock_score, next_ret))
+                data.append((lstm_score, agent_score, next_ret))
                 
     except Exception as e:
         print(f"   [错误] 处理预测数据异常: {e}")
             
-    print(f"   [系统] 成功提取了 {len(data)} 条真实深度学习历史日线验证集交易样本！")
+    print(f"   [系统] 成功提取了 {len(data)} 条真实双通道验证集交易样本！")
     return data
 
 def simulate_sharpe_ratio(data, k_param, thresholds):
@@ -84,6 +82,11 @@ def simulate_sharpe_ratio(data, k_param, thresholds):
         return -999.0 # 无效的阈值排序
         
     portfolio_returns = []
+    prev_pos = 0.0
+    
+    COMMISSION = 0.0003
+    SLIPPAGE   = 0.001
+    STAMP_TAX  = 0.001
     
     for lstm_mock_score, agent_mock_score, true_ret in data:
         # 1. 动态生成 final_score
@@ -107,10 +110,17 @@ def simulate_sharpe_ratio(data, k_param, thresholds):
         else:
             position = -1.0    # 强力看空，满仓做空
             
-        # 扣除滑点和手续费 (假设万分之二)
-        cost = abs(position) * 0.0002
+        # 计算换仓成本（仅在仓位变化时收取）
+        pos_change = abs(position - prev_pos)
+        cost = 0.0
+        if pos_change > 0:
+            cost += pos_change * (COMMISSION + SLIPPAGE)
+            if position < prev_pos:
+                cost += abs(prev_pos - position) * STAMP_TAX
+        
         trade_profit = (position * true_ret) - cost
         portfolio_returns.append(trade_profit)
+        prev_pos = position
         
     # 计算年化夏普比率 (简易化：平均收益 / 收益标准差)
     avg_ret = sum(portfolio_returns) / len(portfolio_returns)

@@ -262,10 +262,14 @@ def train_and_predict_single(file_path, seq_length=20, epochs=100):
         
     X_tensor, y_tensor, scaler_y, scaled_X_full, last_close, dates = prep_result
     
-    train_size = int(len(X_tensor) * 0.8) # 回测取后 20% 作为测试集
+    # 三段式划分：前70%训练 / 中间10%验证 / 最后20%盲测
+    train_size = int(len(X_tensor) * 0.7)
+    val_end    = int(len(X_tensor) * 0.8)
     X_train, y_train = X_tensor[:train_size], y_tensor[:train_size]
-    X_test, y_test = X_tensor[train_size:], y_tensor[train_size:]
-    test_dates = dates[train_size:]
+    X_val,   y_val   = X_tensor[train_size:val_end], y_tensor[train_size:val_end]
+    X_test,  y_test  = X_tensor[val_end:], y_tensor[val_end:]
+    val_dates  = dates[train_size:val_end]
+    test_dates = dates[val_end:]
     
     model = UltimateStockLSTM(input_size=11, hidden_size=64, num_layers=2, output_size=1).to(DEVICE)
     
@@ -287,20 +291,36 @@ def train_and_predict_single(file_path, seq_length=20, epochs=100):
     model.eval()
     historical_preds = []
     with torch.no_grad():
-        # 获取测试集上的预测得分
+        # 在验证集上做预测（标记 Split='val'）
+        if len(X_val) > 0:
+            preds_scaled_v, hidden_states_v = model(X_val)
+            preds_return_v = scaler_y.inverse_transform(preds_scaled_v.cpu().numpy())
+            actuals_return_v = scaler_y.inverse_transform(y_val.cpu().numpy())
+            hidden_states_np_v = hidden_states_v.cpu().numpy()
+            for i in range(len(preds_return_v)):
+                historical_preds.append({
+                    "Date": val_dates[i].strftime('%Y-%m-%d'),
+                    "Symbol": symbol,
+                    "LSTM_Pred_Return": float(preds_return_v[i][0]),
+                    "True_Next_Return": float(actuals_return_v[i][0]),
+                    "Hidden_State_64": hidden_states_np_v[i].tolist(),
+                    "Split": "val"
+                })
+
+        # 在盲测集上做预测（标记 Split='test'）
         if len(X_test) > 0:
             preds_scaled, hidden_states = model(X_test)
             preds_return = scaler_y.inverse_transform(preds_scaled.cpu().numpy())
             actuals_return = scaler_y.inverse_transform(y_test.cpu().numpy())
             hidden_states_np = hidden_states.cpu().numpy()
-            
             for i in range(len(preds_return)):
                 historical_preds.append({
                     "Date": test_dates[i].strftime('%Y-%m-%d'),
                     "Symbol": symbol,
                     "LSTM_Pred_Return": float(preds_return[i][0]),
                     "True_Next_Return": float(actuals_return[i][0]),
-                    "Hidden_State_64": hidden_states_np[i].tolist()
+                    "Hidden_State_64": hidden_states_np[i].tolist(),
+                    "Split": "test"
                 })
         
         latest_window = scaled_X_full[-seq_length:]

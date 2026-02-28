@@ -61,14 +61,21 @@ def train_fusion_model(data_dir, epochs=20, lr=0.001):
     # Sort by date
     lstm_df.sort_values(by='Date', inplace=True)
     
-    # Split chronologically (last 20% for validation)
-    split_idx = int(len(lstm_df) * 0.8)
-    split_date = lstm_df.iloc[split_idx]['Date']
+    # 仅使用验证集数据训练交叉注意力模型
+    if 'Split' in lstm_df.columns:
+        val_data = lstm_df[lstm_df['Split'] == 'val'].copy()
+    else:
+        # 兼容旧版无 Split 列的 CSV
+        split_idx = int(len(lstm_df) * 0.8)
+        split_date = lstm_df.iloc[split_idx]['Date']
+        val_data = lstm_df[lstm_df['Date'] >= split_date].copy()
     
-    train_lstm = lstm_df[lstm_df['Date'] < split_date]
-    val_lstm = lstm_df[lstm_df['Date'] >= split_date]
+    # 在验证集内部再切 80/20，用于交叉注意力的训练和早停
+    sub_split = int(len(val_data) * 0.8)
+    train_lstm = val_data.iloc[:sub_split]
+    val_lstm   = val_data.iloc[sub_split:]
     
-    print(f"Creating PyTorch DataLoaders (Train split date: {split_date})...")
+    print(f"Creating PyTorch DataLoaders (using validation split)...")
     train_dataset = FusionDataset(train_lstm, agent_df)
     val_dataset = FusionDataset(val_lstm, agent_df)
     

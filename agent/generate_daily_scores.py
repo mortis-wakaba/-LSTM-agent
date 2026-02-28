@@ -64,7 +64,18 @@ def main():
     while curr_dt <= end_dt:
         date_str = curr_dt.strftime("%Y-%m-%d")
         
-        # 1. Apply news events for today
+        # 步骤 1: 【先】记录当天所有 50 只股票的得分
+        # 此时图谱中只包含截至昨天（T-1）及之前的信息，不存在前视偏差
+        for stock_code in all_stock_codes:
+            scores = agent.get_feature_vectors(stock_code)
+            total_score = scores[0] if scores else 0.0
+            historical_scores.append({
+                "date": date_str,
+                "stock_code": stock_code,
+                "total_score": round(total_score, 4)
+            })
+
+        # 步骤 2: 【后】注入当天的新闻事件到图谱（留给明天及以后使用）
         todays_events = relations_by_date.get(date_str, [])
         for event in todays_events:
             source = event["source"]
@@ -79,22 +90,10 @@ def main():
             
             # Trigger the propagation
             agent.propagate_impact(target_stock=source, initial_power=sentiment, graph_provider=static_graph_provider)
-            # If the news mentions a target, also propagate from target directly (optional, but realistic)
             if source != target and target in all_stock_codes:
                  agent.propagate_impact(target_stock=target, initial_power=sentiment, graph_provider=static_graph_provider)
 
-        # 2. Record scores for all 50 stocks for this date
-        for stock_code in all_stock_codes:
-            scores = agent.get_feature_vectors(stock_code)
-            # scores is a list: [total_score]
-            total_score = scores[0] if scores else 0.0
-            historical_scores.append({
-                "date": date_str,
-                "stock_code": stock_code,
-                "total_score": round(total_score, 4)
-            })
-
-        # 3. Apply daily AR(1) decay at the end of the day
+        # 步骤 3: 每日衰减
         agent.daily_decay()
         
         curr_dt += timedelta(days=1)

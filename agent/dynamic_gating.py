@@ -29,6 +29,10 @@ class CrossAttentionGate(nn.Module):
             nn.Linear(32, 2) # 输出 2 维：[w_lstm_raw, w_agent_raw]
         )
         
+        # 可学习的量纲映射系数：将 Agent 情绪分 [-1,1] 自适应映射到收益率量纲
+        # 初始化为 0.05（先验假设：Agent 满分对应 5% 日涨幅），由网络自动优化
+        self.alpha = nn.Parameter(torch.tensor(0.05))
+        
     def forward(self, lstm_h: torch.Tensor, agent_score: torch.Tensor):
         """
         lstm_h: [batch, 64]

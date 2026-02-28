@@ -65,44 +65,42 @@ def calc_f1(predictions, true_returns):
     return float(f1_score(true_direction, pred_direction, zero_division=0))
 
 
-def simulate_trades(final_scores, true_returns, thresholds):
+def simulate_trades(merged_df, final_scores, thresholds):
     """
-    根据融合分数和阈值模拟交易，返回每日盈亏列表。
-    交易摩擦模型（贴近 A 股真实成本）：
-      - 券商佣金：单边 0.03%
-      - 印花税：卖出时 0.1%
-      - 滑点/冲击成本：单边 0.1%
-    仅在仓位发生变化时计费（持仓不动不扣费）。
+    根据融合分数和阈值模拟交易，返回【每日投资组合盈亏】列表。
+    持仓按股票(Symbol)独立跟踪产生的手续费，最后按日期(Date)等权重汇总当日盈亏。
     """
     s_buy, buy, sell, s_sell = thresholds
-    daily_pnl = []
-    prev_pos = 0.0  # 追踪前一天的仓位
+    df = merged_df[['Date', 'Symbol', 'True_Next_Return']].copy()
+    df['Score'] = final_scores
 
-    COMMISSION = 0.0003   # 券商佣金：单边万三
-    STAMP_TAX  = 0.0005   # 印花税：卖出时万分之五 (2023.8.28 减半征收新规)
-    SLIPPAGE   = 0.0002   # 预估滑点/冲击成本：单边万分之二
+    # 映射仓位
+    df['Pos'] = 0.0
+    df.loc[df['Score'] >= s_buy, 'Pos'] = 1.0
+    df.loc[(df['Score'] >= buy) & (df['Score'] < s_buy), 'Pos'] = 0.5
+    df.loc[(df['Score'] > s_sell) & (df['Score'] <= sell), 'Pos'] = -0.5
+    df.loc[df['Score'] <= s_sell, 'Pos'] = -1.0
 
-    for score, true_ret in zip(final_scores, true_returns):
-        # 按 5 档阈值映射仓位
-        if   score >= s_buy:   pos = 1.0    # 强力看多，满仓
-        elif score >= buy:     pos = 0.5    # 轻仓试盘
-        elif score > sell:     pos = 0.0    # 空仓观望
-        elif score > s_sell:   pos = -0.5   # 轻仓做空
-        else:                  pos = -1.0   # 强力看空，满仓做空
+    # 针对每只股票独立计算仓位变化
+    df.sort_values(by=['Symbol', 'Date'], inplace=True)
+    df['Prev_Pos'] = df.groupby('Symbol')['Pos'].shift(1).fillna(0.0)
 
-        # 计算仓位变动量
-        pos_change = abs(pos - prev_pos)
-        
-        # 交易成本 = 仅在换仓时收取
-        cost = 0.0
-        if pos_change > 0:
-            cost += pos_change * (COMMISSION + SLIPPAGE)  # 买入/加仓成本
-            # 如果是减仓（前仓位比新仓位大），需要加印花税
-            if pos < prev_pos:
-                cost += abs(prev_pos - pos) * STAMP_TAX
+    COMMISSION = 0.0003
+    STAMP_TAX  = 0.0005
+    SLIPPAGE   = 0.0002
 
-        daily_pnl.append(pos * true_ret - cost)
-        prev_pos = pos
+    df['Pos_Change'] = (df['Pos'] - df['Prev_Pos']).abs()
+    
+    # 基础换仓成本
+    df['Cost'] = df['Pos_Change'] * (COMMISSION + SLIPPAGE)
+    # 卖出加收印花税
+    reduce_mask = df['Pos'] < df['Prev_Pos']
+    df.loc[reduce_mask, 'Cost'] += (df['Prev_Pos'] - df['Pos']).abs() * STAMP_TAX
+
+    df['PnL'] = df['Pos'] * df['True_Next_Return'] - df['Cost']
+
+    # 按日等权汇总投资组合盈亏
+    daily_pnl = df.groupby('Date')['PnL'].mean().values.tolist()
 
     return daily_pnl
 
@@ -195,10 +193,16 @@ def run_ablation(data_dir, k_math=2.0):
     # --- 模拟交易 ---
     thresholds = (0.8, 0.1, -0.1, -0.4)  # 由验证集上的真实数据网格搜索产生（无前视偏差）
 
-    pnl_lstm = simulate_trades(pred_lstm, y_true, thresholds)
-    pnl_agent = simulate_trades(pred_agent, y_true, thresholds)
-    pnl_math = simulate_trades(pred_math, y_true, thresholds)
-    pnl_attn = simulate_trades(pred_attn, y_true, thresholds)
+    pnl_lstm = simulate_trades(merged, pred_lstm, thresholds)
+    pnl_agent = simulate_trades(merged, pred_agent, thresholds)
+    pnl_math = simulate_trades(merged, pred_math, thresholds)
+    pnl_attn = simulate_trades(merged, pred_attn, thresholds)
+
+    # --- 基准策略: Buy & Hold（等权买入持有，不做任何择时） ---
+    # 每天持有全部 50 只股票的等权仓位，计算日均收益
+    bh_daily = merged.groupby('Date')['True_Next_Return'].mean().values.tolist()
+    # Buy & Hold 的 "预测" 就是常数 0（不做方向判断）
+    pred_bh = np.zeros(len(merged))
 
     # --- 构建统一评估表 ---
     def build_row(name, preds, pnl):

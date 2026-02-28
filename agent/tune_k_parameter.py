@@ -82,38 +82,43 @@ def search_best_k(data_dir):
     STAMP_TAX  = 0.0005   # 印花税：卖出时万分之五 (2023.8.28 减半征收新规)
 
     for k in k_candidates:
-        pnl = []
-        prev_pos = 0.0
-        for i in range(len(merged)):
-            # 融合公式
-            w_ag = min(math.pow(abs(agent_scores[i]), k), 1.0)
-            if abs(agent_scores[i]) > 0.7:  # 极端事件强制拉升比重
-                w_ag = max(w_ag, 0.8)
-            
-            final_math = (1.0 - w_ag) * lstm_scores[i] + w_ag * agent_scores[i]
+        # 向量化计算融合得分
+        w_ag = np.minimum(np.power(np.abs(agent_scores), k), 1.0)
+        # 极端事件强制拉升比重
+        w_ag[np.abs(agent_scores) > 0.7] = np.maximum(w_ag[np.abs(agent_scores) > 0.7], 0.8)
+        
+        final_math = (1.0 - w_ag) * lstm_scores + w_ag * agent_scores
 
-            # 阈值派单引擎
-            if   final_math >= s_buy:   pos = 1.0
-            elif final_math >= buy:     pos = 0.5
-            elif final_math > sell:     pos = 0.0
-            elif final_math > s_sell:   pos = -0.5
-            else:                       pos = -1.0
-            
-            # 计算换仓成本
-            pos_change = abs(pos - prev_pos)
-            cost = 0.0
-            if pos_change > 0:
-                cost += pos_change * (COMMISSION + SLIPPAGE)
-                if pos < prev_pos:
-                    cost += abs(prev_pos - pos) * STAMP_TAX
+        df = merged[['Date', 'Symbol', 'True_Next_Return']].copy()
+        df['Score'] = final_math
 
-            pnl.append(pos * y_true[i] - cost)
-            prev_pos = pos
+        # 阈值派单引擎
+        df['Pos'] = 0.0
+        df.loc[df['Score'] >= s_buy, 'Pos'] = 1.0
+        df.loc[(df['Score'] >= buy) & (df['Score'] < s_buy), 'Pos'] = 0.5
+        df.loc[(df['Score'] > s_sell) & (df['Score'] <= sell), 'Pos'] = -0.5
+        df.loc[df['Score'] <= s_sell, 'Pos'] = -1.0
+        
+        # 针对每只股票独立计算仓位变化
+        df.sort_values(by=['Symbol', 'Date'], inplace=True)
+        df['Prev_Pos'] = df.groupby('Symbol')['Pos'].shift(1).fillna(0.0)
+        
+        df['Pos_Change'] = (df['Pos'] - df['Prev_Pos']).abs()
+        
+        # 计算换仓成本
+        df['Cost'] = df['Pos_Change'] * (COMMISSION + SLIPPAGE)
+        reduce_mask = df['Pos'] < df['Prev_Pos']
+        df.loc[reduce_mask, 'Cost'] += (df['Prev_Pos'] - df['Pos']).abs() * STAMP_TAX
+
+        df['PnL'] = df['Pos'] * df['True_Next_Return'] - df['Cost']
+
+        # 按日等权汇总投资组合盈亏
+        daily_pnl = df.groupby('Date')['PnL'].mean().values.tolist()
 
         # 计算业绩指标
-        sharpe = calc_sharpe(pnl)
-        mdd = calc_mdd(pnl)
-        net_val = float(np.prod(1 + np.array(pnl)))
+        sharpe = calc_sharpe(daily_pnl)
+        mdd = calc_mdd(daily_pnl)
+        net_val = float(np.prod(1 + np.array(daily_pnl)))
         
         # 将结果存入字典
         results.append({

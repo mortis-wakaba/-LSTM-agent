@@ -122,8 +122,8 @@ def train_fusion_model(data_dir, epochs=20, lr=0.001):
             # To avoid adding more layers outside CrossAttentionGate, we let CrossAttentionGate 
             # output the weights that minimize the distance between (w_lstm*lstm_pred + w_agent*(agent_score*alpha)) and true return.
             
-            alpha_scaling = 0.05 # Assume max agent impact matches a 5% daily move
-            fused_pred = w_lstm * lstm_pred + w_agent * (agent_score * alpha_scaling)
+            # 使用可学习的量纲映射系数 alpha（由网络自适应优化）
+            fused_pred = w_lstm * lstm_pred + w_agent * (agent_score * model.alpha)
             
             loss = criterion(fused_pred, true_ret)
             loss.backward()
@@ -145,7 +145,7 @@ def train_fusion_model(data_dir, epochs=20, lr=0.001):
                 w_lstm = weights[:, 0].unsqueeze(1)
                 w_agent = weights[:, 1].unsqueeze(1)
                 
-                fused_pred = w_lstm * lstm_pred + w_agent * (agent_score * 0.05)
+                fused_pred = w_lstm * lstm_pred + w_agent * (agent_score * model.alpha)
                 loss = criterion(fused_pred, true_ret)
                 val_loss += loss.item() * len(true_ret)
                 

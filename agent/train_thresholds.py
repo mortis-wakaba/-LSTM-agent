@@ -56,93 +56,59 @@ def generate_real_backtest_data():
         )
         print(f"   [系统] LSTM 与 Agent 数据对齐完成，有效样本: {len(merged)} 条")
         
-        for _, row in merged.iterrows():
-            lstm_score = float(row['LSTM_Pred_Return'])
-            agent_score = float(row['total_score'])  # 真实的 Agent 知识图谱打分
-            next_ret = float(row['True_Next_Return'])
-            
-            # 过滤掉涨跌停板以上的无效跳空数据
-            if abs(next_ret) < 0.21: 
-                data.append((lstm_score, agent_score, next_ret))
+        # 过滤掉涨跌停板以上的无效跳空数据
+        merged = merged[merged['True_Next_Return'].abs() < 0.21].copy()
                 
     except Exception as e:
         print(f"   [错误] 处理预测数据异常: {e}")
             
-    print(f"   [系统] 成功提取了 {len(data)} 条真实双通道验证集交易样本！")
-    return data
+    print(f"   [系统] 成功提取了 {len(merged)} 条真实双通道验证集交易样本！")
+    return merged
 
-def simulate_sharpe_ratio(data, k_param, thresholds):
-    """
-    给定融合参数 k 和 交易阈值，跑一遍回测，计算策略的简易夏普率或总收益
-    thresholds 格式：(strong_buy_th, buy_th, sell_th, strong_sell_th)
-    要求: strong_buy > buy > sell > strong_sell
-    """
-    s_buy, buy, sell, s_sell = thresholds
+def simulate_sharpe_ratio_fast(s_buy, buy, sell, s_sell, scores_sorted, y_true_sorted, same_symbol_mask, date_inverse, num_dates):
     if not (s_buy > buy and buy > sell and sell > s_sell):
-        return -999.0 # 无效的阈值排序
-        
-    portfolio_returns = []
-    prev_pos = 0.0
+        return -999.0 
     
-    COMMISSION = 0.0003   # 券商佣金：单边万三
-    SLIPPAGE   = 0.0002   # 预估滑点/冲击成本：单边万分之二
-    STAMP_TAX  = 0.0005   # 印花税：卖出时万分之五 (2023.8.28 减半征收新规)
+    pos = np.full(len(scores_sorted), -1.0)
+    pos[scores_sorted > s_sell] = -0.5
+    pos[scores_sorted > sell] = 0.0
+    pos[scores_sorted >= buy] = 0.5
+    pos[scores_sorted >= s_buy] = 1.0
     
-    for lstm_mock_score, agent_mock_score, true_ret in data:
-        # 1. 动态生成 final_score
-        w_agent = min(math.pow(abs(agent_mock_score), k_param), 1.0)
-        if abs(agent_mock_score) > 0.7:
-            w_agent = max(w_agent, 0.8)
-            
-        w_lstm = 1.0 - w_agent
-        final_score = w_lstm * lstm_mock_score + w_agent * agent_mock_score
-        
-        # 2. 执行动作决策
-        position = 0.0
-        if final_score >= s_buy:
-            position = 1.0     # 强力看多，满仓
-        elif final_score >= buy:
-            position = 0.5     # 轻仓试盘
-        elif final_score > sell:
-            position = 0.0     # 空仓观望 (Hold)
-        elif final_score > s_sell:
-            position = -0.5    # 轻仓融券做空
-        else:
-            position = -1.0    # 强力看空，满仓做空
-            
-        # 计算换仓成本（仅在仓位变化时收取）
-        pos_change = abs(position - prev_pos)
-        cost = 0.0
-        if pos_change > 0:
-            cost += pos_change * (COMMISSION + SLIPPAGE)
-            if position < prev_pos:
-                cost += abs(prev_pos - position) * STAMP_TAX
-        
-        trade_profit = (position * true_ret) - cost
-        portfolio_returns.append(trade_profit)
-        prev_pos = position
-        
-    # 计算年化夏普比率 (简易化：平均收益 / 收益标准差)
-    avg_ret = sum(portfolio_returns) / len(portfolio_returns)
-    variance = sum((r - avg_ret) ** 2 for r in portfolio_returns) / len(portfolio_returns)
-    std_dev = math.sqrt(variance) if variance > 0 else 0.0001
+    prev_pos = np.roll(pos, 1)
+    if len(prev_pos) > 0:
+        prev_pos[0] = 0.0
+    prev_pos[~same_symbol_mask] = 0.0
     
-    # 假设每日交易，年化倍数 approx sqrt(252)
-    sharpe = (avg_ret / std_dev) * math.sqrt(252)
-    return sharpe
+    COMMISSION = 0.0003
+    SLIPPAGE   = 0.0002
+    STAMP_TAX  = 0.0005
+    
+    pos_change = np.abs(pos - prev_pos)
+    cost = pos_change * (COMMISSION + SLIPPAGE)
+    reduce_mask = pos < prev_pos
+    cost[reduce_mask] += np.abs(prev_pos[reduce_mask] - pos[reduce_mask]) * STAMP_TAX
+    
+    pnl = pos * y_true_sorted - cost
+    
+    daily_pnl_sum = np.bincount(date_inverse, weights=pnl, minlength=num_dates)
+    daily_pnl_count = np.bincount(date_inverse, minlength=num_dates)
+    daily_pnl = daily_pnl_sum / np.maximum(daily_pnl_count, 1)
+    
+    if len(daily_pnl) < 2:
+        return 0.0
+        
+    avg = np.mean(daily_pnl)
+    std = np.std(daily_pnl)
+    if std == 0:
+        return 0.0
+        
+    return float((avg / std) * math.sqrt(252))
 
-def grid_search_thresholds(data):
-    print("🚀 启动端到端超参数回测网格搜索...")
+def grid_search_thresholds(merged_df):
+    print("🚀 启动端到端超参数回测网格搜索 (Numpy 终极加速版)...")
+    import time
     
-    # 构建超参数遍历空间 (Hyperparameter Space)
-    # 取值范围：
-    # k: 控制 Agent 的放大比例，我们将搜索的颗粒度切细一点
-    # s_buy: 0.4 到 0.8
-    # buy:   0.1 到 0.4
-    # sell: -0.4 到 -0.1
-    # s_sell: -0.8 到 -0.4
-    
-    # 增加 k 的网格，从非常不信任(0.5)到非常信任(3.5)，步长 0.5
     k_range = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
     s_buy_range = [0.4, 0.5, 0.6, 0.7, 0.8]
     buy_range = [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]
@@ -156,24 +122,54 @@ def grid_search_thresholds(data):
     total_combinations = len(k_range) * len(s_buy_range) * len(buy_range) * len(sell_range) * len(s_sell_range)
     print(f"📊 即将验证的参数组合总数 (5维空间): {total_combinations} 次跑批")
     
+    df = merged_df.copy()
+    df.sort_values(by=['Symbol', 'Date'], inplace=True)
+    
+    agent_scores = df['total_score'].values
+    lstm_scores = np.clip(df['LSTM_Pred_Return'].values, -1.0, 1.0)
+    y_true_sorted = df['True_Next_Return'].values
+    
+    symbols = df['Symbol'].values
+    same_symbol_mask = np.ones(len(symbols), dtype=bool)
+    if len(symbols) > 0:
+        same_symbol_mask[0] = False
+        same_symbol_mask[1:] = (symbols[1:] == symbols[:-1])
+    
+    dates = df['Date'].values
+    unique_dates, date_inverse = np.unique(dates, return_inverse=True)
+    num_dates = len(unique_dates)
+
+    t0 = time.time()
     count = 0
     for k in k_range:
+        w_ag = np.minimum(np.power(np.abs(agent_scores), k), 1.0)
+        mask_07 = np.abs(agent_scores) > 0.7
+        w_ag[mask_07] = np.maximum(w_ag[mask_07], 0.8)
+        
+        scores_sorted = (1.0 - w_ag) * lstm_scores + w_ag * agent_scores
+        
         for sb in s_buy_range:
             for b in buy_range:
                 for s in sell_range:
                     for ss in s_sell_range:
                         count += 1
-                        thresh = (sb, b, s, ss)
-                        sharpe = simulate_sharpe_ratio(data, k, thresh)
+                        if not (sb > b and b > s and s > ss):
+                            continue
+                        
+                        sharpe = simulate_sharpe_ratio_fast(
+                            sb, b, s, ss, scores_sorted, y_true_sorted, 
+                            same_symbol_mask, date_inverse, num_dates
+                        )
                         
                         if sharpe > best_sharpe:
                             best_sharpe = sharpe
-                            best_thresh = thresh
+                            best_thresh = (sb, b, s, ss)
                             best_k = k
                             
-                        if count % 1000 == 0:
+                        if count % 5000 == 0:
                             print(f"   执行进度: {count} / {total_combinations} ...")
                             
+    print(f"⏱️ 寻优总耗时: {time.time() - t0:.2f} 秒")
     return best_k, best_thresh, best_sharpe
 
 if __name__ == "__main__":
@@ -196,9 +192,8 @@ if __name__ == "__main__":
         real_data = generate_real_backtest_data()
         
         # 防止空数据运行
-        if not real_data:
-            print("未找到真实数据，退回生成模拟数据...")
-            real_data = [] # Fallback
+        if real_data.empty:
+            print("未找到真实数据，退出循环...")
             break
         
         print(f"\n🔍 步骤2/2: 执行超空间网格扫描以寻找夏普最优截断点 ({i+1}/{N_ITERATIONS})...")

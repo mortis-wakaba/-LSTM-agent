@@ -167,62 +167,97 @@ def run_ablation(data_dir, k_math=2.0):
         w_lstm_attn = weights[:, 0].cpu().numpy()
         w_agent_attn = weights[:, 1].cpu().numpy()
 
-    # --- 计算三种模型的融合分数 ---
+    # --- 读取由 XGBoost 单独生成的基线预测 ---
+    xgb_path = os.path.join(data_dir, 'xgboost_historical_predictions.csv')
+    if os.path.exists(xgb_path):
+        xgb_df = pd.read_csv(xgb_path)
+        xgb_df['Date'] = pd.to_datetime(xgb_df['Date'])
+        # 与现有数据严格对齐
+        merged = pd.merge(merged, xgb_df[['Date', 'Symbol', 'XGB_Pred_Return']], 
+                          left_on=['Date', 'Symbol'], right_on=['Date', 'Symbol'], how='inner')
+        pred_xgb_raw = merged['XGB_Pred_Return'].values
+    else:
+        pred_xgb_raw = None
+
+    # --- 计算各模型的原始融合分数 ---
     y_true = merged['True_Next_Return'].values
     lstm_scores = np.clip(merged['LSTM_Pred_Return'].values, -1.0, 1.0)
     agent_scores = merged['total_score'].values
 
     # 模型 1: 纯 LSTM（不融合 Agent 信号）
-    pred_lstm = lstm_scores.copy()
+    pred_lstm_raw = lstm_scores.copy()
 
     # 模型 2: 纯 Agent 图谱（不融合 LSTM 信号，直接使用图谱情绪分数）
-    pred_agent = agent_scores.copy()
+    pred_agent_raw = agent_scores.copy()
 
     # 模型 3: 数学启发式门控（W_agent = |S_agent|^k）
-    pred_math = np.zeros(len(merged))
+    pred_math_raw = np.zeros(len(merged))
     for i in range(len(merged)):
         w_ag = min(math.pow(abs(agent_scores[i]), k_math), 1.0)
         # 重大事件强制接管规则
         if abs(agent_scores[i]) > 0.7:
             w_ag = max(w_ag, 0.8)
-        pred_math[i] = (1.0 - w_ag) * lstm_scores[i] + w_ag * agent_scores[i]
+        pred_math_raw[i] = (1.0 - w_ag) * lstm_scores[i] + w_ag * agent_scores[i]
 
     # 模型 4: 交叉注意力门控（神经网络动态权重）
-    pred_attn = w_lstm_attn * lstm_scores + w_agent_attn * agent_scores
+    pred_attn_raw = w_lstm_attn[:len(merged)] * lstm_scores + w_agent_attn[:len(merged)] * agent_scores
 
-    # --- 模拟交易 ---
-    thresholds = (0.8, 0.1, -0.1, -0.4)  # 由验证集上的真实数据网格搜索产生（无前视偏差）
+    # ============================================================
+    # 评估设计说明：
+    # 
+    # 信号质量指标（MSE, F1）：对所有模型在原始量纲下直接计算，
+    #   因为这两个指标衡量的是"预测方向是否正确"（F1）和
+    #   "预测值与真实收益率的拟合程度"（MSE），不依赖阈值。
+    #
+    # 交易绩效指标（Sharpe, MDD, Net_Value）：仅对输出量纲原生在
+    #   [-1, 1] 区间内的模型进行阈值映射交易模拟。
+    #   XGBoost 和 Pure LSTM 的原始输出在 ±0.05 量级，无法直接
+    #   送入为 Agent 分数设计的阈值系统，因此这两个模型的交易
+    #   绩效列标记为 N/A（不适用）。
+    # ============================================================
+    pred_lstm = pred_lstm_raw
+    pred_agent = pred_agent_raw
+    pred_math = pred_math_raw
+    pred_attn = pred_attn_raw
+    pred_xgb = pred_xgb_raw if pred_xgb_raw is not None else None
 
-    pnl_lstm = simulate_trades(merged, pred_lstm, thresholds)
+    # --- 模拟交易（仅对量纲兼容的模型） ---
+    thresholds = (0.8, 0.1, -0.1, -0.4)
+
     pnl_agent = simulate_trades(merged, pred_agent, thresholds)
     pnl_math = simulate_trades(merged, pred_math, thresholds)
     pnl_attn = simulate_trades(merged, pred_attn, thresholds)
 
-    # --- 基准策略: Buy & Hold（等权买入持有，不做任何择时） ---
-    # 每天持有全部 50 只股票的等权仓位，计算日均收益
-    bh_daily = merged.groupby('Date')['True_Next_Return'].mean().values.tolist()
-    # Buy & Hold 的 "预测" 就是常数 0（不做方向判断）
-    pred_bh = np.zeros(len(merged))
-
     # --- 构建统一评估表 ---
-    def build_row(name, preds, pnl):
-        """为单个模型计算全部 6 个评估指标"""
-        return {
+    def build_row(name, preds, pnl=None):
+        """为单个模型计算评估指标，pnl=None 时交易指标标记为 N/A"""
+        row = {
             "Model": name,
             "MSE": round(mean_squared_error(y_true, preds), 6),
-            "IC": round(calc_ic(preds, y_true), 4),
             "F1_Score": round(calc_f1(preds, y_true), 4),
-            "Sharpe": round(calc_sharpe(pnl), 4),
-            "MDD": round(calc_mdd(pnl), 4),
-            "Net_Value": round(float(np.prod(1 + np.array(pnl))), 4),
         }
+        if pnl is not None:
+            row["Sharpe"] = round(calc_sharpe(pnl), 4)
+            row["MDD"] = round(calc_mdd(pnl), 4)
+            row["Net_Value"] = round(float(np.prod(1 + np.array(pnl))), 4)
+        else:
+            row["Sharpe"] = "N/A"
+            row["MDD"] = "N/A"
+            row["Net_Value"] = "N/A"
+        return row
 
-    results = pd.DataFrame([
-        build_row("Pure_LSTM", pred_lstm, pnl_lstm),
+    rows = []
+    if pred_xgb is not None:
+        rows.append(build_row("XGBoost_Baseline", pred_xgb, pnl=None))
+    
+    rows.extend([
+        build_row("Pure_LSTM", pred_lstm, pnl=None),
         build_row("Pure_Agent", pred_agent, pnl_agent),
         build_row(f"Math_Gating_k{k_math}", pred_math, pnl_math),
         build_row("CrossAttention", pred_attn, pnl_attn),
     ])
+    
+    results = pd.DataFrame(rows)
 
     # 保存结果
     csv_path = os.path.join(data_dir, "ablation_study.csv")
